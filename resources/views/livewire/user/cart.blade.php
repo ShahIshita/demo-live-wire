@@ -1,10 +1,4 @@
 <div>
-    @if (session()->has('message'))
-        <div class="alert alert-success">
-            {{ session('message') }}
-        </div>
-    @endif
-
     <div class="cart-header">
         <h2>Your Cart</h2>
         <a href="{{ route('dashboard') }}" class="btn btn-secondary">Continue Shopping</a>
@@ -62,6 +56,11 @@
 
         <div class="cart-total">
             <strong>Total: ${{ number_format($cartTotal, 2) }}</strong>
+        </div>
+
+        <div class="cart-actions" style="margin-top: 24px;">
+            <a href="{{ route('addresses.index') }}" class="btn btn-secondary">Manage Addresses</a>
+            <a href="{{ route('checkout.index') }}" class="btn btn-primary">Proceed to Checkout</a>
         </div>
     @endif
 </div>

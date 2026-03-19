@@ -1,10 +1,4 @@
 <div>
-    @if (session()->has('message'))
-        <div class="alert alert-success">
-            {{ session('message') }}
-        </div>
-    @endif
-
     <div class="fav-header">
         <h2>My Favourites</h2>
         <a href="{{ route('dashboard') }}" class="btn btn-secondary">Back to Products</a>

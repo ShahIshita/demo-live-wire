@@ -1,18 +1,14 @@
 <div>
-    @if (session()->has('message'))
-        <div class="alert alert-success">
-            {{ session('message') }}
-        </div>
-    @endif
-
     <div class="products-header">
         <h2>Our Products</h2>
-        <div class="header-links">
-            <a href="{{ route('cart.index') }}" class="btn btn-cart">
-                Cart ({{ auth()->user()->cart ? auth()->user()->cart->items->sum('quantity') : 0 }})
-            </a>
-            <a href="{{ route('favourites.index') }}" class="btn btn-favourite">My Favourites</a>
-        </div>
+        @unless (auth()->user()->is_admin ?? false)
+            <div class="header-links">
+                <a href="{{ route('cart.index') }}" class="btn btn-cart">
+                    Cart ({{ auth()->user()->cart ? auth()->user()->cart->items->sum('quantity') : 0 }})
+                </a>
+                <a href="{{ route('favourites.index') }}" class="btn btn-favourite">My Favourites</a>
+            </div>
+        @endunless
     </div>
 
     <div class="product-grid">
@@ -27,17 +23,19 @@
                 </div>
                 <div class="product-card-body">
                     <h3 class="product-name">{{ $product->name }}</h3>
-                    <p class="product-desc">{{ Str::limit($product->description, 80) }}</p>
+                    <p class="product-desc">{{ auth()->user()->is_admin ? $product->description : Str::limit($product->description, 80) }}</p>
                     <p class="product-price">${{ number_format($product->price, 2) }}</p>
                     <p class="product-stock">In stock: {{ $product->stock_quantity }}</p>
-                    <div class="product-actions">
-                        <button wire:click="addToCart({{ $product->id }})" class="btn btn-add-cart">
-                            {{ $this->isInCart($product->id) ? 'In Cart ✓' : 'Add to Cart' }}
-                        </button>
-                        <button wire:click="addToFavourite({{ $product->id }})" class="btn btn-fav {{ $this->isFavourite($product->id) ? 'is-favourite' : '' }}">
-                            {{ $this->isFavourite($product->id) ? '♥ Favourited' : '♡ Favourite' }}
-                        </button>
-                    </div>
+                    @unless (auth()->user()->is_admin ?? false)
+                        <div class="product-actions">
+                            <button wire:click="addToCart({{ $product->id }})" class="btn btn-add-cart">
+                                {{ $this->isInCart($product->id) ? 'In Cart ✓' : 'Add to Cart' }}
+                            </button>
+                            <button wire:click="addToFavourite({{ $product->id }})" class="btn btn-fav {{ $this->isFavourite($product->id) ? 'is-favourite' : '' }}">
+                                {{ $this->isFavourite($product->id) ? '♥ Favourited' : '♡ Favourite' }}
+                            </button>
+                        </div>
+                    @endunless
                 </div>
             </div>
         @empty

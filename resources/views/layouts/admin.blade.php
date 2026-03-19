@@ -76,7 +76,7 @@
         .product-table tbody tr:hover { background: #f7fafc; }
         .product-thumb { width: 60px; height: 60px; object-fit: cover; border-radius: 8px; }
         .no-image { color: #a0aec0; font-size: 13px; }
-        .desc-cell { max-width: 200px; }
+        .desc-cell { max-width: 320px; white-space: pre-wrap; word-break: break-word; }
         .empty-state { padding: 40px; text-align: center; color: #718096; background: white; border-radius: 12px; }
         .empty-state a { color: #667eea; }
 
@@ -91,6 +91,10 @@
         .required { color: #f56565; }
         .form-hint { font-size: 12px; color: #718096; margin-top: 4px; display: block; }
         .form-actions { display: flex; gap: 12px; margin-top: 24px; }
+        .delivery-edit-form { min-width: 220px; }
+        .delivery-edit-form .form-group { margin-bottom: 12px; }
+        .delivery-edit-form .form-group label { font-size: 12px; }
+        .delivery-edit-form .form-control { padding: 8px 12px; }
         .current-image { margin-bottom: 12px; }
         .current-image p { font-size: 13px; color: #718096; margin-bottom: 8px; }
     </style>
@@ -103,6 +107,7 @@
             <a href="{{ route('admin.products.index') }}" class="navbar-brand">{{ config('app.name', 'Laravel') }} Admin</a>
             <div class="navbar-links">
                 <a href="{{ route('admin.products.index') }}">Products</a>
+                <a href="{{ route('admin.orders.index') }}">Orders</a>
                 <a href="{{ route('dashboard') }}">Dashboard</a>
                 @livewire('auth.logout')
             </div>

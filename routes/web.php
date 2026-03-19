@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\StripeController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -30,6 +31,13 @@ Route::middleware('guest')->group(function () {
 
 // Authenticated routes (accessible only when authenticated)
 Route::middleware('auth')->group(function () {
+    Route::post('/logout', function () {
+        auth()->logout();
+        request()->session()->invalidate();
+        request()->session()->regenerateToken();
+        return redirect()->route('login')->with('message', 'You have been logged out successfully.');
+    })->name('logout');
+
     Route::get('/dashboard', function () {
         return view('dashboard');
     })->name('dashboard');
@@ -42,6 +50,25 @@ Route::middleware('auth')->group(function () {
     Route::get('/favourites', function () {
         return view('favourites');
     })->name('favourites.index');
+
+    Route::get('/profile', function () {
+        return view('profile');
+    })->name('profile.index');
+
+    Route::get('/addresses', function () {
+        return view('addresses');
+    })->name('addresses.index');
+
+    Route::get('/checkout', function () {
+        return view('checkout');
+    })->name('checkout.index');
+
+    Route::get('/orders/{id}', function ($id) {
+        return view('order-detail', ['orderId' => $id]);
+    })->name('orders.show');
+
+    Route::post('/stripe/create-payment-intent', [StripeController::class, 'createPaymentIntent'])->name('stripe.create-intent');
+    Route::post('/stripe/confirm-order', [StripeController::class, 'confirmOrder'])->name('stripe.confirm-order');
 
     // Admin routes (admin-only access)
     Route::middleware('admin')->prefix('admin')->name('admin.')->group(function () {
@@ -56,5 +83,9 @@ Route::middleware('auth')->group(function () {
         Route::get('/products/{id}/edit', function ($id) {
             return view('admin.products.edit', ['productId' => $id]);
         })->name('products.edit');
+
+        Route::get('/orders', function () {
+            return view('admin.orders.index');
+        })->name('orders.index');
     });
 });

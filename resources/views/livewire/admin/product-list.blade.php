@@ -36,7 +36,7 @@
                                 @endif
                             </td>
                             <td>{{ $product->name }}</td>
-                            <td class="desc-cell">{{ Str::limit($product->description, 50) }}</td>
+                            <td class="desc-cell">{{ $product->description }}</td>
                             <td>${{ number_format($product->price, 2) }}</td>
                             <td>{{ $product->stock_quantity }}</td>
                             <td>
