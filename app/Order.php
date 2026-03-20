@@ -14,6 +14,9 @@ class Order extends Model
         'total',
         'stripe_payment_intent_id',
         'stripe_payment_status',
+        'payment_status',
+        'shipping_charge',
+        'shipping_method_id',
         'delivery_date',
         'delivery_tracking_number',
         'delivery_carrier',
@@ -22,6 +25,7 @@ class Order extends Model
     protected $casts = [
         'subtotal' => 'decimal:2',
         'total' => 'decimal:2',
+        'shipping_charge' => 'decimal:2',
         'delivery_date' => 'date',
     ];
 
@@ -45,5 +49,10 @@ class Order extends Model
         return $this->belongsToMany(Product::class, 'order_items')
             ->withPivot(['quantity', 'price'])
             ->withTimestamps();
+    }
+
+    public function shippingMethod()
+    {
+        return $this->belongsTo(ShippingMethod::class, 'shipping_method_id');
     }
 }

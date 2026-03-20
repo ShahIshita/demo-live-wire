@@ -16,7 +16,7 @@ class User extends Authenticatable
      * @var array
      */
     protected $fillable = [
-        'name', 'email', 'password',
+        'name', 'email', 'password', 'is_active',
     ];
 
     /**
@@ -36,6 +36,7 @@ class User extends Authenticatable
     protected $casts = [
         'email_verified_at' => 'datetime',
         'is_admin' => 'boolean',
+        'is_active' => 'boolean',
     ];
 
     public function cart()
@@ -61,5 +62,25 @@ class User extends Authenticatable
     public function orders()
     {
         return $this->hasMany(Order::class);
+    }
+
+    public function roles()
+    {
+        return $this->belongsToMany(Role::class, 'role_user');
+    }
+
+    public function reviews()
+    {
+        return $this->hasMany(Review::class);
+    }
+
+    public function hasRole(string $slug): bool
+    {
+        return $this->roles()->where('slug', $slug)->exists();
+    }
+
+    public function hasAnyAdminRole(): bool
+    {
+        return $this->is_admin || $this->roles()->whereIn('slug', ['admin', 'manager', 'support'])->exists();
     }
 }

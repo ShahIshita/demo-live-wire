@@ -106,11 +106,12 @@ class StripeController extends Controller
             $order = Order::create([
                 'user_id' => $user->id,
                 'address_id' => $address->id,
-                'status' => 'placed',
+                'status' => 'pending',
                 'subtotal' => $subtotal,
                 'total' => $total,
                 'stripe_payment_intent_id' => $request->payment_intent_id,
                 'stripe_payment_status' => 'succeeded',
+                'payment_status' => 'paid',
             ]);
 
             foreach ($cartItems as $item) {

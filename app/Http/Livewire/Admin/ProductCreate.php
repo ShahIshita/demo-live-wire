@@ -2,7 +2,9 @@
 
 namespace App\Http\Livewire\Admin;
 
+use App\Category;
 use App\Product;
+use App\ProductVariant;
 use Livewire\Component;
 use Livewire\WithFileUploads;
 
@@ -14,7 +16,9 @@ class ProductCreate extends Component
     public $description;
     public $price;
     public $image;
-    public $stock_quantity;
+    public $stock_quantity = 0;
+    public $category_id = '';
+    public $variants = [];
 
     protected $rules = [
         'name' => 'required|string|max:255',
@@ -22,6 +26,7 @@ class ProductCreate extends Component
         'price' => 'required|numeric|min:0',
         'image' => 'nullable|image|max:2048',
         'stock_quantity' => 'required|integer|min:0',
+        'category_id' => 'nullable|exists:categories,id',
     ];
 
     protected $messages = [
@@ -50,7 +55,8 @@ class ProductCreate extends Component
             $imagePath = $this->image->store('products', 'public');
         }
 
-        Product::create([
+        $product = Product::create([
+            'category_id' => $this->category_id ?: null,
             'name' => $this->name,
             'description' => $this->description,
             'price' => $this->price,
@@ -58,12 +64,38 @@ class ProductCreate extends Component
             'stock_quantity' => (int) $this->stock_quantity,
         ]);
 
-        $this->reset(['name', 'description', 'price', 'image', 'stock_quantity']);
+        foreach ($this->variants as $v) {
+            if (!empty($v['size']) || !empty($v['color'])) {
+                ProductVariant::create([
+                    'product_id' => $product->id,
+                    'sku' => $v['sku'] ?? null,
+                    'size' => $v['size'] ?? null,
+                    'color' => $v['color'] ?? null,
+                    'price' => isset($v['price']) && $v['price'] !== '' ? $v['price'] : $this->price,
+                    'stock_quantity' => (int) ($v['stock_quantity'] ?? 0),
+                ]);
+            }
+        }
+
         session()->flash('message', 'Product created successfully.');
+        return redirect()->route('admin.products.index');
+    }
+
+    public function addVariant()
+    {
+        $this->variants[] = ['size' => '', 'color' => '', 'price' => $this->price, 'stock_quantity' => 0, 'sku' => ''];
+    }
+
+    public function removeVariant($index)
+    {
+        unset($this->variants[$index]);
+        $this->variants = array_values($this->variants);
     }
 
     public function render()
     {
-        return view('livewire.admin.product-create');
+        return view('livewire.admin.product-create', [
+            'categories' => Category::where('is_active', true)->orderBy('name')->get(),
+        ]);
     }
 }

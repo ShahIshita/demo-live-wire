@@ -23,6 +23,16 @@
             @error('description') <span class="error-message">{{ $message }}</span> @enderror
         </div>
 
+        <div class="form-group">
+            <label for="category_id">Category</label>
+            <select id="category_id" wire:model="category_id" class="form-control">
+                <option value="">— Select category —</option>
+                @foreach ($categories as $c)
+                    <option value="{{ $c->id }}">{{ $c->name }}</option>
+                @endforeach
+            </select>
+        </div>
+
         <div class="form-row">
             <div class="form-group">
                 <label for="price">Price <span class="required">*</span></label>
@@ -35,6 +45,21 @@
                 <input type="number" id="stock_quantity" wire:model="stock_quantity" min="0" class="form-control @error('stock_quantity') is-invalid @enderror" placeholder="0">
                 @error('stock_quantity') <span class="error-message">{{ $message }}</span> @enderror
             </div>
+        </div>
+
+        <div class="form-group">
+            <label>Variants (Size, Color)</label>
+            @foreach ($variants as $i => $v)
+                <div class="d-flex gap-2 mb-2 align-items-end">
+                    <input type="text" wire:model="variants.{{ $i }}.size" class="form-control form-control-sm" placeholder="Size" style="width:100px">
+                    <input type="text" wire:model="variants.{{ $i }}.color" class="form-control form-control-sm" placeholder="Color" style="width:100px">
+                    <input type="number" wire:model="variants.{{ $i }}.price" step="0.01" class="form-control form-control-sm" placeholder="Price" style="width:90px">
+                    <input type="number" wire:model="variants.{{ $i }}.stock_quantity" min="0" class="form-control form-control-sm" placeholder="Stock" style="width:80px">
+                    <input type="text" wire:model="variants.{{ $i }}.sku" class="form-control form-control-sm" placeholder="SKU" style="width:100px">
+                    <button type="button" wire:click="removeVariant({{ $i }})" class="btn btn-sm btn-outline-danger">×</button>
+                </div>
+            @endforeach
+            <button type="button" wire:click="addVariant" class="btn btn-sm btn-outline-secondary">+ Add Variant</button>
         </div>
 
         <div class="form-group">

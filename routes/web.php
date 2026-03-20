@@ -72,20 +72,28 @@ Route::middleware('auth')->group(function () {
 
     // Admin routes (admin-only access)
     Route::middleware('admin')->prefix('admin')->name('admin.')->group(function () {
-        Route::get('/products', function () {
-            return view('admin.products.index');
-        })->name('products.index');
+        Route::get('/', fn () => redirect()->route('admin.dashboard'))->name('index');
+        Route::get('/dashboard', fn () => view('admin.dashboard'))->name('dashboard');
 
-        Route::get('/products/create', function () {
-            return view('admin.products.create');
-        })->name('products.create');
+        Route::get('/products', fn () => view('admin.products.index'))->name('products.index');
+        Route::get('/products/create', fn () => view('admin.products.create'))->name('products.create');
+        Route::get('/products/{id}/edit', fn ($id) => view('admin.products.edit', ['productId' => $id]))->name('products.edit');
 
-        Route::get('/products/{id}/edit', function ($id) {
-            return view('admin.products.edit', ['productId' => $id]);
-        })->name('products.edit');
+        Route::get('/categories', fn () => view('admin.categories.index'))->name('categories.index');
+        Route::get('/categories/create', fn () => view('admin.categories.create'))->name('categories.create');
+        Route::get('/categories/{id}/edit', fn ($id) => view('admin.categories.edit', ['categoryId' => $id]))->name('categories.edit');
 
-        Route::get('/orders', function () {
-            return view('admin.orders.index');
-        })->name('orders.index');
+        Route::get('/orders', fn () => view('admin.orders.index'))->name('orders.index');
+        Route::get('/orders/{id}', fn ($id) => view('admin.orders.show', ['orderId' => $id]))->name('orders.show');
+
+        Route::get('/payments', fn () => view('admin.payments.index'))->name('payments.index');
+
+        Route::get('/users', fn () => view('admin.users.index'))->name('users.index');
+
+        Route::get('/reviews', fn () => view('admin.reviews.index'))->name('reviews.index');
+
+        Route::get('/shipping', fn () => view('admin.shipping.index'))->name('shipping.index');
+
+        Route::get('/settings', fn () => view('admin.settings.index'))->name('settings.index');
     });
 });
