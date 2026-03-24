@@ -18,6 +18,8 @@ Route::get('/', function () {
     return view('welcome');
 });
 
+Route::post('/stripe/webhook', [StripeController::class, 'handleWebhook'])->name('stripe.webhook');
+
 // Guest routes (accessible only when not authenticated)
 Route::middleware('guest')->group(function () {
     Route::get('/register', function () {
