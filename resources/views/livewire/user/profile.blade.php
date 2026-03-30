@@ -80,7 +80,12 @@
                         <div class="order-card">
                             <div class="order-card-header">
                                 <strong>{{ $subscription['product_name'] }}</strong>
-                                <span class="order-status-badge {{ $subscription['status'] }}">{{ ucfirst($subscription['status']) }}</span>
+                                @php
+                                    $statusLabel = $subscription['status'] === 'trialing'
+                                        ? 'Active (Trial)'
+                                        : ucfirst($subscription['status']);
+                                @endphp
+                                <span class="order-status-badge {{ $subscription['status'] }}">{{ $statusLabel }}</span>
                             </div>
 
                             <div class="order-card-body">

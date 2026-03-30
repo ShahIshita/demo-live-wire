@@ -48,7 +48,11 @@ class SubscriptionProductGrid extends Component
 
         $productIds = [];
         foreach ($subscriptions->data as $subscription) {
-            if (in_array($subscription->status, ['active', 'trialing', 'past_due'])) {
+            $isRunning = in_array($subscription->status, ['active', 'trialing', 'past_due'], true);
+            $isScheduledToCancel = (bool) ($subscription->cancel_at_period_end ?? false);
+
+            // Once user cancels, enable subscribe button again for that product.
+            if ($isRunning && !$isScheduledToCancel) {
                 $productId = $subscription->metadata->product_id ?? null;
                 if (!empty($productId)) {
                     $productIds[] = (int) $productId;

@@ -80,7 +80,6 @@ Route::middleware('auth')->group(function () {
     Route::post('/stripe/subscriptions/create-intent', [SubscriptionController::class, 'createIntent'])->name('stripe.subscriptions.create-intent');
     Route::post('/stripe/subscriptions/confirm-plan', [SubscriptionController::class, 'confirmPlanSubscription'])->name('stripe.subscriptions.confirm-plan');
     Route::post('/stripe/subscriptions/confirm-trial-monthly', [SubscriptionController::class, 'confirmTrialMonthly'])->name('stripe.subscriptions.confirm-trial-monthly');
-    Route::post('/stripe/subscriptions/sync-payment-method', [SubscriptionController::class, 'syncPaymentMethodFromIntent'])->name('stripe.subscriptions.sync-payment-method');
     Route::get('/subscriptions/{subscriptionId}', [SubscriptionController::class, 'show'])->name('subscriptions.show');
 
     // Admin routes (admin-only access)

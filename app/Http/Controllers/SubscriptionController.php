@@ -7,12 +7,11 @@ use App\Support\StripeTimeouts;
 use App\User;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
-use Stripe\Charge;
 use Stripe\Exception\ApiErrorException;
-use Stripe\Invoice;
 use Stripe\PaymentIntent;
 use Stripe\PaymentMethod;
 use Stripe\Product as StripeProduct;
+use Stripe\SetupIntent;
 use Stripe\Stripe;
 use Stripe\Subscription;
 
@@ -26,9 +25,6 @@ class SubscriptionController extends Controller
 
     /** $1.00 / month (100 cents). */
     private const AMOUNT_MONTHLY_CENTS = 100;
-
-    /** $0.50 trial fee (50 cents). */
-    private const TRIAL_FEE_CENTS = 50;
 
     private const TRIAL_DAYS = 7;
 
@@ -116,200 +112,6 @@ class SubscriptionController extends Controller
     }
 
     /**
-     * Pull a PaymentIntent from an invoice (expanded object, charge, or charge list).
-     */
-    protected function extractPaymentIntentFromInvoice($invoice): ?PaymentIntent
-    {
-        if (!$invoice) {
-            return null;
-        }
-
-        $pi = $invoice->payment_intent ?? null;
-        if ($pi) {
-            return is_string($pi) ? PaymentIntent::retrieve($pi) : $pi;
-        }
-
-        if (!empty($invoice->charge)) {
-            $charge = is_string($invoice->charge)
-                ? Charge::retrieve($invoice->charge)
-                : $invoice->charge;
-            if (!empty($charge->payment_intent)) {
-                $pi = $charge->payment_intent;
-
-                return is_string($pi) ? PaymentIntent::retrieve($pi) : $pi;
-            }
-        }
-
-        if (isset($invoice->charges) && !empty($invoice->charges->data)) {
-            foreach ($invoice->charges->data as $charge) {
-                if (!empty($charge->payment_intent)) {
-                    $pi = $charge->payment_intent;
-
-                    return is_string($pi) ? PaymentIntent::retrieve($pi) : $pi;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * List PaymentIntents for the customer and find the one Stripe attached to this invoice.
-     */
-    protected function findPaymentIntentForInvoice(string $customerId, string $invoiceId): ?PaymentIntent
-    {
-        try {
-            $intents = PaymentIntent::all([
-                'customer' => $customerId,
-                'limit' => 30,
-            ]);
-        } catch (ApiErrorException $e) {
-            return null;
-        }
-
-        foreach ($intents->data as $intent) {
-            $inv = $intent->invoice ?? null;
-            $invId = is_string($inv) ? $inv : ($inv->id ?? null);
-            if ($invId === $invoiceId) {
-                return PaymentIntent::retrieve($intent->id);
-            }
-        }
-
-        return null;
-    }
-
-    protected function subscriptionLatestInvoiceId(Subscription $subscription): ?string
-    {
-        $inv = $subscription->latest_invoice ?? null;
-        if (is_string($inv)) {
-            return $inv;
-        }
-        if (is_object($inv) && !empty($inv->id)) {
-            return $inv->id;
-        }
-
-        return null;
-    }
-
-    /**
-     * When the invoice API omits payment_intent (account/API quirks), Stripe still exposes a hosted
-     * payment page URL after the invoice is open — customers can pay there with any card Stripe allows.
-     */
-    protected function recoverPaymentIntentOrHostedInvoice(
-        Subscription $subscription,
-        string $customerId
-    ): array {
-        $invId = $this->subscriptionLatestInvoiceId($subscription);
-        if (!$invId) {
-            $subFresh = Subscription::retrieve($subscription->id, [
-                'expand' => ['latest_invoice'],
-            ]);
-            $invId = $this->subscriptionLatestInvoiceId($subFresh);
-        }
-        if (!$invId) {
-            return ['payment_intent' => null, 'hosted_url' => null, 'invoice' => null];
-        }
-
-        $invoice = Invoice::retrieve($invId, [
-            'expand' => ['payment_intent', 'charge', 'charges'],
-        ]);
-
-        if (isset($invoice->status) && $invoice->status === 'draft') {
-            try {
-                $invObj = Invoice::retrieve($invoice->id);
-                $invObj->finalizeInvoice([
-                    'expand' => ['payment_intent', 'charge', 'charges'],
-                ]);
-            } catch (ApiErrorException $e) {
-                // Invoice may already be finalized; reload below.
-            }
-            $invoice = Invoice::retrieve($invId, [
-                'expand' => ['payment_intent', 'charge', 'charges'],
-            ]);
-        }
-
-        $pi = $this->extractPaymentIntentFromInvoice($invoice);
-        if (!$pi) {
-            $pi = $this->findPaymentIntentForInvoice($customerId, $invoice->id);
-        }
-
-        $hostedUrl = $invoice->hosted_invoice_url ?? null;
-        if (!$hostedUrl && !empty($invoice->id)) {
-            $invoice = Invoice::retrieve($invoice->id, [
-                'expand' => ['payment_intent'],
-            ]);
-            $hostedUrl = $invoice->hosted_invoice_url ?? null;
-        }
-
-        return [
-            'payment_intent' => $pi,
-            'hosted_url' => $hostedUrl,
-            'invoice' => $invoice,
-        ];
-    }
-
-    /**
-     * First incomplete subscription invoice: PaymentIntent exists after the invoice is finalized.
-     * The Stripe PHP SDK only supports finalize via an Invoice instance (not Invoice::finalizeInvoice static).
-     */
-    protected function resolveSubscriptionFirstPaymentIntent(Subscription $subscription, string $customerId): ?PaymentIntent
-    {
-        $sub = Subscription::retrieve($subscription->id, [
-            'expand' => ['latest_invoice.payment_intent'],
-        ]);
-
-        $invoice = $sub->latest_invoice ?? null;
-        if (!$invoice) {
-            return null;
-        }
-
-        if (is_string($invoice)) {
-            $invoice = Invoice::retrieve($invoice, [
-                'expand' => ['payment_intent', 'charge', 'charges'],
-            ]);
-        }
-
-        $pi = $this->extractPaymentIntentFromInvoice($invoice);
-
-        // Draft: payment_intent is created when the invoice is finalized (instance method, not static).
-        if (!$pi && !empty($invoice->id) && isset($invoice->status) && $invoice->status === 'draft') {
-            try {
-                $invObj = Invoice::retrieve($invoice->id);
-                $invObj->finalizeInvoice([
-                    'expand' => ['payment_intent', 'charge', 'charges'],
-                ]);
-                $invoice = $invObj;
-            } catch (ApiErrorException $e) {
-                $invoice = Invoice::retrieve($invoice->id, [
-                    'expand' => ['payment_intent', 'charge', 'charges'],
-                ]);
-            }
-            $pi = $this->extractPaymentIntentFromInvoice($invoice);
-        }
-
-        // Still missing PI: refresh invoice (open/draft) and list PaymentIntents by invoice id.
-        if (!$pi && !empty($invoice->id) && isset($invoice->status) && in_array($invoice->status, ['draft', 'open'], true)) {
-            try {
-                Invoice::update($invoice->id, [
-                    'auto_advance' => true,
-                ]);
-            } catch (ApiErrorException $e) {
-                // ignore
-            }
-            $invoice = Invoice::retrieve($invoice->id, [
-                'expand' => ['payment_intent', 'charge', 'charges'],
-            ]);
-            $pi = $this->extractPaymentIntentFromInvoice($invoice);
-        }
-
-        if (!$pi && !empty($invoice->id)) {
-            $pi = $this->findPaymentIntentForInvoice($customerId, $invoice->id);
-        }
-
-        return $pi;
-    }
-
-    /**
      * @param string $planType daily|monthly (trial_monthly uses monthly recurring after trial)
      */
     protected function subscriptionItemForPlan(Product $product, string $planType): array
@@ -355,7 +157,10 @@ class SubscriptionController extends Controller
                 continue;
             }
 
-            if (in_array($subscription->status, ['active', 'trialing', 'past_due', 'unpaid'])) {
+            $isRunning = in_array($subscription->status, ['active', 'trialing', 'past_due', 'unpaid'], true);
+            $isScheduledToCancel = (bool) ($subscription->cancel_at_period_end ?? false);
+
+            if ($isRunning && !$isScheduledToCancel) {
                 return true;
             }
         }
@@ -393,11 +198,9 @@ class SubscriptionController extends Controller
                 }
 
                 if ($validated['plan_type'] === 'trial_monthly') {
-                    $intent = PaymentIntent::create([
-                        'amount' => self::TRIAL_FEE_CENTS,
-                        'currency' => self::CURRENCY,
+                    $intent = SetupIntent::create([
                         'customer' => $customerId,
-                        'setup_future_usage' => 'off_session',
+                        'usage' => 'off_session',
                         'metadata' => [
                             'user_id' => (string) $user->id,
                             'product_id' => (string) $product->id,
@@ -407,7 +210,7 @@ class SubscriptionController extends Controller
                     ]);
 
                     return response()->json([
-                        'mode' => 'trial_fee_payment',
+                        'mode' => 'trial_setup_intent',
                         'clientSecret' => $intent->client_secret,
                     ]);
                 }
@@ -546,7 +349,7 @@ class SubscriptionController extends Controller
     }
 
     /**
-     * After trial fee PaymentIntent succeeds, start 7-day trial then monthly billing (USD).
+     * After SetupIntent succeeds, start 7-day trial then monthly billing (USD).
      */
     public function confirmTrialMonthly(Request $request)
     {
@@ -555,28 +358,32 @@ class SubscriptionController extends Controller
 
         $validated = $request->validate([
             'product_id' => 'required|exists:products,id',
-            'payment_intent_id' => 'required|string',
+            'setup_intent_id' => 'required|string',
         ]);
 
         $user = $request->user();
         $product = Product::findOrFail($validated['product_id']);
 
-        $paymentIntent = PaymentIntent::retrieve($validated['payment_intent_id']);
+        $setupIntent = SetupIntent::retrieve($validated['setup_intent_id']);
 
-        if ($paymentIntent->status !== 'succeeded') {
-            return response()->json(['error' => 'Trial payment is not completed.'], 422);
+        if ($setupIntent->status !== 'succeeded') {
+            return response()->json(['error' => 'Card setup is not completed.'], 422);
         }
 
-        if ((string) ($paymentIntent->metadata->user_id ?? '') !== (string) $user->id) {
-            return response()->json(['error' => 'Invalid payment for this user.'], 403);
+        if ((string) ($setupIntent->metadata->user_id ?? '') !== (string) $user->id) {
+            return response()->json(['error' => 'Invalid setup intent for this user.'], 403);
         }
 
-        if ((string) ($paymentIntent->metadata->product_id ?? '') !== (string) $product->id) {
-            return response()->json(['error' => 'Payment does not match this product.'], 422);
+        if ((string) ($setupIntent->metadata->product_id ?? '') !== (string) $product->id) {
+            return response()->json(['error' => 'Setup intent does not match this product.'], 422);
         }
 
-        if (empty($paymentIntent->payment_method)) {
-            return response()->json(['error' => 'No payment method on trial payment.'], 422);
+        if ((string) ($setupIntent->metadata->plan_type ?? '') !== 'trial_monthly') {
+            return response()->json(['error' => 'Setup intent does not match trial plan.'], 422);
+        }
+
+        if (empty($setupIntent->payment_method)) {
+            return response()->json(['error' => 'No payment method in setup intent.'], 422);
         }
 
         for ($attempt = 0; $attempt < 2; $attempt++) {
@@ -588,13 +395,12 @@ class SubscriptionController extends Controller
                     return response()->json(['error' => 'You already have an active subscription for this product.'], 409);
                 }
 
-                // Subscription::create(..., default_payment_method) requires the PM on the customer.
-                // Even when PI.customer matches, the PM can still be only on the PaymentIntent until attached.
-                $this->attachPaymentMethodToCustomer($paymentIntent->payment_method, $customerId);
+                // Ensure setup card is attached to customer before creating trial subscription.
+                $this->attachPaymentMethodToCustomer($setupIntent->payment_method, $customerId);
 
                 $subscription = Subscription::create([
                     'customer' => $customerId,
-                    'default_payment_method' => $paymentIntent->payment_method,
+                    'default_payment_method' => $setupIntent->payment_method,
                     'trial_period_days' => self::TRIAL_DAYS,
                     'items' => [
                         $this->subscriptionItemForPlan($product, 'monthly'),
@@ -615,7 +421,7 @@ class SubscriptionController extends Controller
                     'success' => true,
                     'subscriptionId' => $subscription->id,
                     'redirect' => route('subscriptions.show', $subscription->id),
-                    'message' => 'Trial started: $0.50 paid. After ' . self::TRIAL_DAYS . ' days, billing is $1.00/month.',
+                    'message' => 'Trial started: no charge today. After ' . self::TRIAL_DAYS . ' days, billing is $1.00/month.',
                 ]);
             } catch (ApiErrorException $e) {
                 if ($this->isStripeCurrencyConflict($e) && $attempt === 0) {
@@ -628,53 +434,6 @@ class SubscriptionController extends Controller
         }
 
         return response()->json(['error' => 'Unable to create subscription after trial payment.'], 500);
-    }
-
-    /**
-     * After confirmCardPayment succeeds on a subscription invoice PaymentIntent, ensure the card
-     * is attached to the Stripe customer (fixes "payment method must be attached to the customer").
-     */
-    public function syncPaymentMethodFromIntent(Request $request)
-    {
-        $this->extendExecutionTime();
-        $this->ensureStripeKey();
-
-        $validated = $request->validate([
-            'payment_intent_id' => 'required|string',
-        ]);
-
-        $user = $request->user();
-        $paymentIntent = PaymentIntent::retrieve($validated['payment_intent_id']);
-
-        if ($paymentIntent->status !== 'succeeded') {
-            return response()->json(['error' => 'Payment is not completed.'], 422);
-        }
-
-        if (empty($paymentIntent->payment_method)) {
-            return response()->json(['error' => 'No payment method on this payment.'], 422);
-        }
-
-        $customerId = $this->resolveStripeCustomer($user);
-
-        if (!empty($paymentIntent->customer) && $paymentIntent->customer !== $customerId) {
-            return response()->json(['error' => 'This payment belongs to a different customer.'], 403);
-        }
-
-        try {
-            $this->attachPaymentMethodToCustomer($paymentIntent->payment_method, $customerId);
-
-            \Stripe\Customer::update($customerId, [
-                'invoice_settings' => [
-                    'default_payment_method' => $paymentIntent->payment_method,
-                ],
-            ]);
-        } catch (ApiErrorException $e) {
-            return response()->json(['error' => $e->getMessage()], 400);
-        }
-
-        StripeTimeouts::forgetUserSubscriptionCaches($user);
-
-        return response()->json(['success' => true]);
     }
 
     public function show(string $subscriptionId)

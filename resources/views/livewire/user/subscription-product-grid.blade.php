@@ -28,14 +28,14 @@
                     <p class="product-price">${{ number_format($product->price, 2) }}</p>
                     <p class="product-stock">In stock: {{ $product->stock_quantity }}</p>
 
-                    <div class="subscription-card-plans" aria-label="Available subscription plans">
+                    <!-- <div class="subscription-card-plans" aria-label="Available subscription plans">
                         <p class="subscription-card-plans-title">Subscription options</p>
                         <ul class="subscription-card-plans-list">
                             <li><strong>Daily</strong> — $1.00 charged every day</li>
-                            <li><strong>Trial + monthly</strong> — 7-day trial: $0.50 trial fee, then $1.00 per month</li>
+                            <li><strong>Trial + monthly</strong> — 7-day free trial, then $1.00 per month</li>
                             <li><strong>Monthly</strong> — $1.00 per month</li>
                         </ul>
-                    </div>
+                    </div> -->
 
                     @unless (auth()->user()->is_admin ?? false)
                         <div class="product-actions">
@@ -82,7 +82,7 @@
                     <input type="radio" name="subscription-plan" value="trial_monthly">
                     <span>
                         <strong>7-day trial + monthly</strong><br>
-                        $0.50 trial fee now, then $1.00 per month after 7 days.
+                        No charge today. Starts 7-day trial, then $1.00 per month.
                     </span>
                 </label>
                 <label class="subscription-plan-option">
@@ -199,8 +199,8 @@
             plan_type: planType
         })
             .then(function(intentData) {
-                if (intentData.mode === 'trial_fee_payment') {
-                    return stripe.confirmCardPayment(intentData.clientSecret, {
+                if (intentData.mode === 'trial_setup_intent') {
+                    return stripe.confirmCardSetup(intentData.clientSecret, {
                         payment_method: {
                             card: card
                         }
@@ -211,7 +211,7 @@
 
                         return postJson('{{ route('stripe.subscriptions.confirm-trial-monthly') }}', {
                             product_id: selectedProductId,
-                            payment_intent_id: result.paymentIntent.id
+                            setup_intent_id: result.setupIntent.id
                         });
                     });
                 }
