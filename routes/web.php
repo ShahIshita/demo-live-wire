@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\StripeController;
+use App\Http\Controllers\SubscriptionController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -44,6 +45,11 @@ Route::middleware('auth')->group(function () {
         return view('dashboard');
     })->name('dashboard');
 
+    /** Featured products + subscription module (4 items, 3 plan types). */
+    Route::get('/products', function () {
+        return view('products-tab');
+    })->name('products.tab');
+
     // User cart and favourites
     Route::get('/cart', function () {
         return view('cart');
@@ -71,6 +77,11 @@ Route::middleware('auth')->group(function () {
 
     Route::post('/stripe/create-payment-intent', [StripeController::class, 'createPaymentIntent'])->name('stripe.create-intent');
     Route::post('/stripe/confirm-order', [StripeController::class, 'confirmOrder'])->name('stripe.confirm-order');
+    Route::post('/stripe/subscriptions/create-intent', [SubscriptionController::class, 'createIntent'])->name('stripe.subscriptions.create-intent');
+    Route::post('/stripe/subscriptions/confirm-plan', [SubscriptionController::class, 'confirmPlanSubscription'])->name('stripe.subscriptions.confirm-plan');
+    Route::post('/stripe/subscriptions/confirm-trial-monthly', [SubscriptionController::class, 'confirmTrialMonthly'])->name('stripe.subscriptions.confirm-trial-monthly');
+    Route::post('/stripe/subscriptions/sync-payment-method', [SubscriptionController::class, 'syncPaymentMethodFromIntent'])->name('stripe.subscriptions.sync-payment-method');
+    Route::get('/subscriptions/{subscriptionId}', [SubscriptionController::class, 'show'])->name('subscriptions.show');
 
     // Admin routes (admin-only access)
     Route::middleware('admin')->prefix('admin')->name('admin.')->group(function () {

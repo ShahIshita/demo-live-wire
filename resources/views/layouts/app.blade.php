@@ -225,6 +225,11 @@
             color: #22543d;
             border: 1px solid #9ae6b4;
         }
+        .alert-warning {
+            background-color: #fefcbf;
+            color: #744210;
+            border: 1px solid #f6e05e;
+        }
 
         .stats-grid {
             display: grid;
@@ -299,12 +304,97 @@
         .product-desc { font-size: 14px; color: #718096; margin-bottom: 8px; line-height: 1.4; }
         .product-price { font-size: 20px; font-weight: 700; color: #667eea; margin-bottom: 4px; }
         .product-stock { font-size: 12px; color: #718096; margin-bottom: 16px; }
+        .subscription-card-plans {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin-bottom: 14px;
+            font-size: 12px;
+            color: #4a5568;
+            line-height: 1.45;
+        }
+        .subscription-card-plans-title { font-weight: 700; color: #2d3748; margin-bottom: 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+        .subscription-card-plans-list { margin: 0; padding-left: 18px; }
+        .subscription-card-plans-list li { margin-bottom: 4px; }
         .product-actions { display: flex; gap: 8px; flex-wrap: wrap; }
         .btn-add-cart { background: #667eea; color: white; padding: 8px 16px; }
         .btn-remove-fav { background: #e2e8f0; color: #4a5568; padding: 8px 16px; }
         .btn-fav { background: #e2e8f0; color: #4a5568; padding: 8px 16px; }
         .btn-fav.is-favourite { background: #fc8181; color: white; }
+        .btn-subscription { background: #2d3748; color: #ffffff; padding: 8px 16px; }
+        .btn-subscription:hover { background: #1a202c; }
+        .btn-subscription[disabled] { background: #a0aec0; cursor: not-allowed; }
         .empty-products, .empty-cart, .empty-fav { text-align: center; padding: 60px 20px; }
+
+        /* Subscription modal */
+        .subscription-modal {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1200;
+        }
+        .subscription-modal.is-open { display: flex; }
+        .subscription-modal-backdrop {
+            position: absolute;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.6);
+        }
+        .subscription-modal-content {
+            position: relative;
+            width: min(560px, 92vw);
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+            padding: 24px;
+            z-index: 1;
+        }
+        .subscription-modal-close {
+            position: absolute;
+            top: 8px;
+            right: 10px;
+            border: none;
+            background: transparent;
+            font-size: 28px;
+            line-height: 1;
+            color: #4a5568;
+            cursor: pointer;
+        }
+        .subscription-modal-product {
+            margin: 10px 0 16px;
+            color: #4a5568;
+            font-weight: 700;
+        }
+        .subscription-plan-list {
+            display: grid;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+        .subscription-plan-option {
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 12px;
+            cursor: pointer;
+        }
+        .subscription-plan-option:hover { border-color: #667eea; background: #f8f9ff; }
+        .subscription-card-element {
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            background: #ffffff;
+            min-height: 40px;
+        }
+        .subscription-modal-actions {
+            margin-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
 
         /* Cart */
         .cart-table table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
@@ -404,6 +494,10 @@
         .order-status-badge.shipped { background: #bee3f8; color: #2c5282; }
         .order-status-badge.delivered { background: #c6f6d5; color: #22543d; }
         .order-status-badge.pending { background: #feebc8; color: #c05621; }
+        .order-status-badge.active { background: #c6f6d5; color: #22543d; }
+        .order-status-badge.trialing { background: #bee3f8; color: #2c5282; }
+        .order-status-badge.past_due, .order-status-badge.unpaid { background: #fed7d7; color: #c53030; }
+        .order-status-badge.canceled { background: #e2e8f0; color: #4a5568; }
         .order-date { color: #718096; font-size: 13px; margin-left: auto; }
         .order-card-body p { margin-bottom: 6px; font-size: 14px; }
         .delivery-tracking { color: #667eea; }
@@ -415,11 +509,13 @@
 <body>
     <nav class="navbar">
         <div class="navbar-content">
-            <a href="{{ route('dashboard') }}" class="navbar-brand">
+            <a href="{{ Auth::user()->is_admin ?? false ? route('admin.dashboard') : route('dashboard') }}" class="navbar-brand">
                 {{ config('app.name', 'Laravel') }}
             </a>
             <div class="navbar-menu">
-                <a href="{{ route('dashboard') }}" style="color: white; text-decoration: none; font-weight: 500;">Products</a>
+                @unless (Auth::user()->is_admin ?? false)
+                    <a href="{{ route('products.tab') }}" style="color: white; text-decoration: none; font-weight: 500;">Products</a>
+                @endunless
                 @unless (Auth::user()->is_admin ?? false)
                     <a href="{{ route('cart.index') }}" style="color: white; text-decoration: none; font-weight: 500; display: flex; align-items: center;">
                         Cart
@@ -427,6 +523,9 @@
                         @if ($cartCount > 0)
                             <span class="cart-badge">{{ $cartCount }}</span>
                         @endif
+                    </a>
+                    <a href="{{ route('profile.index') }}?tab=subscription" style="color: white; text-decoration: none; font-weight: 500;">
+                        Subscription
                     </a>
                 @endunless
                 <div class="navbar-user">
@@ -453,6 +552,9 @@
                                 </a>
                                 <a href="{{ route('profile.index') }}?tab=orders" class="account-menu-item">
                                     <span class="icon">📦</span> Orders
+                                </a>
+                                <a href="{{ route('profile.index') }}?tab=subscription" class="account-menu-item">
+                                    <span class="icon">🔁</span> Subscription
                                 </a>
                                 <a href="{{ route('profile.index') }}?tab=address" class="account-menu-item">
                                     <span class="icon">📍</span> Saved Addresses

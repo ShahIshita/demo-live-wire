@@ -11,6 +11,9 @@
         <button type="button" class="profile-tab {{ $activeTab === 'address' ? 'active' : '' }}" wire:click="setTab('address')">
             Addresses
         </button>
+        <button type="button" class="profile-tab {{ $activeTab === 'subscription' ? 'active' : '' }}" wire:click="setTab('subscription')">
+            Subscription
+        </button>
     </div>
 
     @if ($activeTab === 'orders')
@@ -56,6 +59,71 @@
     @if ($activeTab === 'address')
         <div class="profile-content">
             @livewire('user.address-manager')
+        </div>
+    @endif
+
+    @if ($activeTab === 'subscription')
+        <div class="profile-content card">
+            <h3>Subscription</h3>
+
+            @if ($subscriptionAlert)
+                <div class="alert alert-warning">
+                    {{ $subscriptionAlert }}
+                </div>
+            @endif
+
+            @if (empty($subscriptionDetails))
+                <p class="empty-state">No active subscription found. Open any product and choose the Subscription option to start.</p>
+            @else
+                <div class="orders-list">
+                    @foreach ($subscriptionDetails as $subscription)
+                        <div class="order-card">
+                            <div class="order-card-header">
+                                <strong>{{ $subscription['product_name'] }}</strong>
+                                <span class="order-status-badge {{ $subscription['status'] }}">{{ ucfirst($subscription['status']) }}</span>
+                            </div>
+
+                            <div class="order-card-body">
+                                <p><strong>Product ID:</strong> {{ $subscription['product_id'] ?? 'N/A' }}</p>
+                                @php
+                                    $planTypeLabel = [
+                                        'daily' => 'Daily',
+                                        'monthly' => 'Monthly',
+                                        'trial_monthly' => '7-day trial + monthly',
+                                    ][$subscription['plan_type']] ?? ucfirst(str_replace('_', ' ', $subscription['plan_type']));
+                                @endphp
+                                <p><strong>Plan type:</strong> {{ $planTypeLabel }}</p>
+
+                                @if ($subscription['trial_ends_at'])
+                                    <p><strong>Trial ends:</strong> {{ $subscription['trial_ends_at']->format('M d, Y') }}</p>
+                                    <p><strong>Trial days left:</strong> {{ $subscription['trial_days_left'] }}</p>
+                                @endif
+
+                                @if ($subscription['current_period_ends_at'])
+                                    <p><strong>Current period ends:</strong> {{ $subscription['current_period_ends_at']->format('M d, Y') }}</p>
+                                @endif
+
+                                <p><strong>Auto renew:</strong> {{ $subscription['auto_renew'] ? 'On' : 'Off' }}</p>
+                            </div>
+
+                            <div class="order-card-actions">
+                                @if ($subscription['auto_renew'])
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm btn-delete"
+                                        wire:click="cancelSubscription('{{ $subscription['id'] }}')"
+                                        onclick="return confirm('Cancel this subscription at period end?')"
+                                    >
+                                        Cancel Subscription
+                                    </button>
+                                @else
+                                    <span style="font-size: 13px; color: #718096;">Cancellation scheduled</span>
+                                @endif
+                            </div>
+                        </div>
+                    @endforeach
+                </div>
+            @endif
         </div>
     @endif
 </div>

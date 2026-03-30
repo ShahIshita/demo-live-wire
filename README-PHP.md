@@ -40,7 +40,9 @@ run-php74.bat artisan serve --host=127.0.0.1 --port=8000
 
 ### C) Laravel Herd (recommended for `learning.test`)
 
-In Herd, set this site’s PHP version to **7.4**, then open the site in the browser (no `artisan serve` needed).
+Start **Laravel Herd** (Windows), ensure this project is the active site (`learning.test` → `D:\learning`), and set PHP **7.4** for that host. Then open **`https://learning.test`** (no `artisan serve` needed). You can double‑click **`open-learning-test.bat`** in the project root to launch Herd and the browser.
+
+Set **`APP_URL=https://learning.test`** in `.env` (see `.env.example`).
 
 ## Check which PHP runs
 

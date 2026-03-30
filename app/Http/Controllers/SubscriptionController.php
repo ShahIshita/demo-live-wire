@@ -1,0 +1,713 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Product;
+use App\Support\StripeTimeouts;
+use App\User;
+use Carbon\Carbon;
+use Illuminate\Http\Request;
+use Stripe\Charge;
+use Stripe\Exception\ApiErrorException;
+use Stripe\Invoice;
+use Stripe\PaymentIntent;
+use Stripe\PaymentMethod;
+use Stripe\Product as StripeProduct;
+use Stripe\Stripe;
+use Stripe\Subscription;
+
+class SubscriptionController extends Controller
+{
+    /** All amounts in smallest currency unit (cents for USD). */
+    private const CURRENCY = 'usd';
+
+    /** $1.00 / day (100 cents) — matches prior “100” demo pricing in dollars. */
+    private const AMOUNT_DAILY_CENTS = 100;
+
+    /** $1.00 / month (100 cents). */
+    private const AMOUNT_MONTHLY_CENTS = 100;
+
+    /** $0.50 trial fee (50 cents). */
+    private const TRIAL_FEE_CENTS = 50;
+
+    private const TRIAL_DAYS = 7;
+
+    protected function extendExecutionTime(): void
+    {
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(120);
+        }
+    }
+
+    protected function ensureStripeKey(): void
+    {
+        $secret = config('services.stripe.secret') ?: env('STRIPE_SECRET');
+        if (empty($secret)) {
+            abort(500, 'Stripe not configured. Add STRIPE_SECRET to .env and run: php artisan config:clear');
+        }
+
+        Stripe::setApiKey($secret);
+        StripeTimeouts::apply();
+    }
+
+    protected function resolveStripeCustomer(User $user): string
+    {
+        if (!empty($user->stripe_customer_id)) {
+            return $user->stripe_customer_id;
+        }
+
+        $customer = \Stripe\Customer::create([
+            'email' => $user->email,
+            'name' => $user->name,
+            'metadata' => [
+                'user_id' => $user->id,
+                'app_currency' => self::CURRENCY,
+            ],
+        ]);
+
+        $user->stripe_customer_id = $customer->id;
+        $user->save();
+
+        return $customer->id;
+    }
+
+    /**
+     * Stripe does not mix currencies on one customer (e.g. prior INR vs USD).
+     * Clear the stored id so the next call creates a fresh customer in the app currency.
+     */
+    protected function isStripeCurrencyConflict(ApiErrorException $e): bool
+    {
+        $msg = $e->getMessage();
+
+        return stripos($msg, 'cannot combine currencies') !== false;
+    }
+
+    protected function recreateStripeCustomer(User $user): string
+    {
+        $user->stripe_customer_id = null;
+        $user->save();
+
+        return $this->resolveStripeCustomer($user->fresh());
+    }
+
+    /**
+     * Stripe requires the payment method to be attached to the customer before using it as
+     * default_payment_method on Subscription, or when the API validates ownership.
+     */
+    protected function attachPaymentMethodToCustomer(string $paymentMethodId, string $customerId): void
+    {
+        $pm = PaymentMethod::retrieve($paymentMethodId);
+        if (!empty($pm->customer) && $pm->customer === $customerId) {
+            return;
+        }
+        if (!empty($pm->customer) && $pm->customer !== $customerId) {
+            $pm->detach();
+            $pm = PaymentMethod::retrieve($paymentMethodId);
+        }
+        try {
+            $pm->attach(['customer' => $customerId]);
+        } catch (ApiErrorException $e) {
+            // Already attached to this customer in a race, or Stripe idempotent edge case.
+            $pm = PaymentMethod::retrieve($paymentMethodId);
+            if (empty($pm->customer) || $pm->customer !== $customerId) {
+                throw $e;
+            }
+        }
+    }
+
+    /**
+     * Pull a PaymentIntent from an invoice (expanded object, charge, or charge list).
+     */
+    protected function extractPaymentIntentFromInvoice($invoice): ?PaymentIntent
+    {
+        if (!$invoice) {
+            return null;
+        }
+
+        $pi = $invoice->payment_intent ?? null;
+        if ($pi) {
+            return is_string($pi) ? PaymentIntent::retrieve($pi) : $pi;
+        }
+
+        if (!empty($invoice->charge)) {
+            $charge = is_string($invoice->charge)
+                ? Charge::retrieve($invoice->charge)
+                : $invoice->charge;
+            if (!empty($charge->payment_intent)) {
+                $pi = $charge->payment_intent;
+
+                return is_string($pi) ? PaymentIntent::retrieve($pi) : $pi;
+            }
+        }
+
+        if (isset($invoice->charges) && !empty($invoice->charges->data)) {
+            foreach ($invoice->charges->data as $charge) {
+                if (!empty($charge->payment_intent)) {
+                    $pi = $charge->payment_intent;
+
+                    return is_string($pi) ? PaymentIntent::retrieve($pi) : $pi;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * List PaymentIntents for the customer and find the one Stripe attached to this invoice.
+     */
+    protected function findPaymentIntentForInvoice(string $customerId, string $invoiceId): ?PaymentIntent
+    {
+        try {
+            $intents = PaymentIntent::all([
+                'customer' => $customerId,
+                'limit' => 30,
+            ]);
+        } catch (ApiErrorException $e) {
+            return null;
+        }
+
+        foreach ($intents->data as $intent) {
+            $inv = $intent->invoice ?? null;
+            $invId = is_string($inv) ? $inv : ($inv->id ?? null);
+            if ($invId === $invoiceId) {
+                return PaymentIntent::retrieve($intent->id);
+            }
+        }
+
+        return null;
+    }
+
+    protected function subscriptionLatestInvoiceId(Subscription $subscription): ?string
+    {
+        $inv = $subscription->latest_invoice ?? null;
+        if (is_string($inv)) {
+            return $inv;
+        }
+        if (is_object($inv) && !empty($inv->id)) {
+            return $inv->id;
+        }
+
+        return null;
+    }
+
+    /**
+     * When the invoice API omits payment_intent (account/API quirks), Stripe still exposes a hosted
+     * payment page URL after the invoice is open — customers can pay there with any card Stripe allows.
+     */
+    protected function recoverPaymentIntentOrHostedInvoice(
+        Subscription $subscription,
+        string $customerId
+    ): array {
+        $invId = $this->subscriptionLatestInvoiceId($subscription);
+        if (!$invId) {
+            $subFresh = Subscription::retrieve($subscription->id, [
+                'expand' => ['latest_invoice'],
+            ]);
+            $invId = $this->subscriptionLatestInvoiceId($subFresh);
+        }
+        if (!$invId) {
+            return ['payment_intent' => null, 'hosted_url' => null, 'invoice' => null];
+        }
+
+        $invoice = Invoice::retrieve($invId, [
+            'expand' => ['payment_intent', 'charge', 'charges'],
+        ]);
+
+        if (isset($invoice->status) && $invoice->status === 'draft') {
+            try {
+                $invObj = Invoice::retrieve($invoice->id);
+                $invObj->finalizeInvoice([
+                    'expand' => ['payment_intent', 'charge', 'charges'],
+                ]);
+            } catch (ApiErrorException $e) {
+                // Invoice may already be finalized; reload below.
+            }
+            $invoice = Invoice::retrieve($invId, [
+                'expand' => ['payment_intent', 'charge', 'charges'],
+            ]);
+        }
+
+        $pi = $this->extractPaymentIntentFromInvoice($invoice);
+        if (!$pi) {
+            $pi = $this->findPaymentIntentForInvoice($customerId, $invoice->id);
+        }
+
+        $hostedUrl = $invoice->hosted_invoice_url ?? null;
+        if (!$hostedUrl && !empty($invoice->id)) {
+            $invoice = Invoice::retrieve($invoice->id, [
+                'expand' => ['payment_intent'],
+            ]);
+            $hostedUrl = $invoice->hosted_invoice_url ?? null;
+        }
+
+        return [
+            'payment_intent' => $pi,
+            'hosted_url' => $hostedUrl,
+            'invoice' => $invoice,
+        ];
+    }
+
+    /**
+     * First incomplete subscription invoice: PaymentIntent exists after the invoice is finalized.
+     * The Stripe PHP SDK only supports finalize via an Invoice instance (not Invoice::finalizeInvoice static).
+     */
+    protected function resolveSubscriptionFirstPaymentIntent(Subscription $subscription, string $customerId): ?PaymentIntent
+    {
+        $sub = Subscription::retrieve($subscription->id, [
+            'expand' => ['latest_invoice.payment_intent'],
+        ]);
+
+        $invoice = $sub->latest_invoice ?? null;
+        if (!$invoice) {
+            return null;
+        }
+
+        if (is_string($invoice)) {
+            $invoice = Invoice::retrieve($invoice, [
+                'expand' => ['payment_intent', 'charge', 'charges'],
+            ]);
+        }
+
+        $pi = $this->extractPaymentIntentFromInvoice($invoice);
+
+        // Draft: payment_intent is created when the invoice is finalized (instance method, not static).
+        if (!$pi && !empty($invoice->id) && isset($invoice->status) && $invoice->status === 'draft') {
+            try {
+                $invObj = Invoice::retrieve($invoice->id);
+                $invObj->finalizeInvoice([
+                    'expand' => ['payment_intent', 'charge', 'charges'],
+                ]);
+                $invoice = $invObj;
+            } catch (ApiErrorException $e) {
+                $invoice = Invoice::retrieve($invoice->id, [
+                    'expand' => ['payment_intent', 'charge', 'charges'],
+                ]);
+            }
+            $pi = $this->extractPaymentIntentFromInvoice($invoice);
+        }
+
+        // Still missing PI: refresh invoice (open/draft) and list PaymentIntents by invoice id.
+        if (!$pi && !empty($invoice->id) && isset($invoice->status) && in_array($invoice->status, ['draft', 'open'], true)) {
+            try {
+                Invoice::update($invoice->id, [
+                    'auto_advance' => true,
+                ]);
+            } catch (ApiErrorException $e) {
+                // ignore
+            }
+            $invoice = Invoice::retrieve($invoice->id, [
+                'expand' => ['payment_intent', 'charge', 'charges'],
+            ]);
+            $pi = $this->extractPaymentIntentFromInvoice($invoice);
+        }
+
+        if (!$pi && !empty($invoice->id)) {
+            $pi = $this->findPaymentIntentForInvoice($customerId, $invoice->id);
+        }
+
+        return $pi;
+    }
+
+    /**
+     * @param string $planType daily|monthly (trial_monthly uses monthly recurring after trial)
+     */
+    protected function subscriptionItemForPlan(Product $product, string $planType): array
+    {
+        $stripeProduct = StripeProduct::create([
+            'name' => $product->name . ' Subscription (' . $planType . ')',
+            'metadata' => [
+                'local_product_id' => (string) $product->id,
+            ],
+        ]);
+
+        $recurring = ['interval' => 'month'];
+        $unitAmount = self::AMOUNT_MONTHLY_CENTS;
+
+        if ($planType === 'daily') {
+            $recurring = ['interval' => 'day'];
+            $unitAmount = self::AMOUNT_DAILY_CENTS;
+        }
+
+        return [
+            // Inline price_data removes extra Stripe Product+Price API calls and reduces request time.
+            'price_data' => [
+                'currency' => self::CURRENCY,
+                'unit_amount' => $unitAmount,
+                'recurring' => $recurring,
+                'product' => $stripeProduct->id,
+            ],
+            'quantity' => 1,
+        ];
+    }
+
+    protected function hasRunningSubscriptionForProduct(string $customerId, int $productId): bool
+    {
+        $subscriptions = Subscription::all([
+            'customer' => $customerId,
+            'status' => 'all',
+            'limit' => 100,
+        ]);
+
+        foreach ($subscriptions->data as $subscription) {
+            $subscriptionProductId = (int) ($subscription->metadata->product_id ?? 0);
+            if ($subscriptionProductId !== $productId) {
+                continue;
+            }
+
+            if (in_array($subscription->status, ['active', 'trialing', 'past_due', 'unpaid'])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    protected function firstChargeAmountForPlan(string $planType): int
+    {
+        return $planType === 'daily'
+            ? self::AMOUNT_DAILY_CENTS
+            : self::AMOUNT_MONTHLY_CENTS;
+    }
+
+    public function createIntent(Request $request)
+    {
+        $this->extendExecutionTime();
+        $this->ensureStripeKey();
+
+        $validated = $request->validate([
+            'product_id' => 'required|exists:products,id',
+            'plan_type' => 'required|in:daily,monthly,trial_monthly',
+        ]);
+
+        $user = $request->user();
+        $product = Product::findOrFail($validated['product_id']);
+
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            try {
+                $user->refresh();
+                $customerId = $this->resolveStripeCustomer($user);
+
+                if ($this->hasRunningSubscriptionForProduct($customerId, (int) $product->id)) {
+                    return response()->json(['error' => 'You already have an active subscription for this product.'], 409);
+                }
+
+                if ($validated['plan_type'] === 'trial_monthly') {
+                    $intent = PaymentIntent::create([
+                        'amount' => self::TRIAL_FEE_CENTS,
+                        'currency' => self::CURRENCY,
+                        'customer' => $customerId,
+                        'setup_future_usage' => 'off_session',
+                        'metadata' => [
+                            'user_id' => (string) $user->id,
+                            'product_id' => (string) $product->id,
+                            'plan_type' => 'trial_monthly',
+                        ],
+                        'payment_method_types' => ['card'],
+                    ]);
+
+                    return response()->json([
+                        'mode' => 'trial_fee_payment',
+                        'clientSecret' => $intent->client_secret,
+                    ]);
+                }
+
+                $amount = $this->firstChargeAmountForPlan($validated['plan_type']);
+                $intent = PaymentIntent::create([
+                    'amount' => $amount,
+                    'currency' => self::CURRENCY,
+                    'customer' => $customerId,
+                    'setup_future_usage' => 'off_session',
+                    'metadata' => [
+                        'user_id' => (string) $user->id,
+                        'product_id' => (string) $product->id,
+                        'plan_type' => $validated['plan_type'],
+                    ],
+                    'payment_method_types' => ['card'],
+                ]);
+
+                $label = $validated['plan_type'] === 'daily'
+                    ? 'Pay $1.00 now, then your daily plan will continue automatically.'
+                    : 'Pay $1.00 now, then your monthly plan will continue automatically.';
+
+                return response()->json([
+                    'mode' => 'plan_initial_payment',
+                    'clientSecret' => $intent->client_secret,
+                    'message' => $label,
+                ]);
+            } catch (ApiErrorException $e) {
+                if ($this->isStripeCurrencyConflict($e) && $attempt === 0) {
+                    $this->recreateStripeCustomer($user);
+                    continue;
+                }
+
+                return response()->json(['error' => $e->getMessage()], 400);
+            }
+        }
+
+        return response()->json(['error' => 'Unable to initialize subscription payment.'], 500);
+    }
+
+    /**
+     * After daily/monthly first payment succeeds, create the recurring subscription.
+     */
+    public function confirmPlanSubscription(Request $request)
+    {
+        $this->extendExecutionTime();
+        $this->ensureStripeKey();
+
+        $validated = $request->validate([
+            'product_id' => 'required|exists:products,id',
+            'plan_type' => 'required|in:daily,monthly',
+            'payment_intent_id' => 'required|string',
+        ]);
+
+        $user = $request->user();
+        $product = Product::findOrFail($validated['product_id']);
+        $paymentIntent = PaymentIntent::retrieve($validated['payment_intent_id']);
+
+        if ($paymentIntent->status !== 'succeeded') {
+            return response()->json(['error' => 'Payment is not completed.'], 422);
+        }
+
+        if ((string) ($paymentIntent->metadata->user_id ?? '') !== (string) $user->id) {
+            return response()->json(['error' => 'Invalid payment for this user.'], 403);
+        }
+
+        if ((string) ($paymentIntent->metadata->product_id ?? '') !== (string) $product->id) {
+            return response()->json(['error' => 'Payment does not match this product.'], 422);
+        }
+
+        if ((string) ($paymentIntent->metadata->plan_type ?? '') !== (string) $validated['plan_type']) {
+            return response()->json(['error' => 'Payment does not match the selected plan.'], 422);
+        }
+
+        if (empty($paymentIntent->payment_method)) {
+            return response()->json(['error' => 'No payment method on this payment.'], 422);
+        }
+
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            try {
+                $user->refresh();
+                $customerId = $this->resolveStripeCustomer($user);
+
+                if (!empty($paymentIntent->customer) && $paymentIntent->customer !== $customerId) {
+                    return response()->json(['error' => 'This payment belongs to a different customer.'], 403);
+                }
+
+                if ($this->hasRunningSubscriptionForProduct($customerId, (int) $product->id)) {
+                    return response()->json(['error' => 'You already have an active subscription for this product.'], 409);
+                }
+
+                $this->attachPaymentMethodToCustomer($paymentIntent->payment_method, $customerId);
+
+                $trialEnd = $validated['plan_type'] === 'daily'
+                    ? now()->addDay()->timestamp
+                    : Carbon::now()->addMonthNoOverflow()->timestamp;
+
+                $subscription = Subscription::create([
+                    'customer' => $customerId,
+                    'default_payment_method' => $paymentIntent->payment_method,
+                    'trial_end' => $trialEnd,
+                    'items' => [
+                        $this->subscriptionItemForPlan($product, $validated['plan_type']),
+                    ],
+                    'payment_settings' => [
+                        'save_default_payment_method' => 'on_subscription',
+                    ],
+                    'metadata' => [
+                        'user_id' => $user->id,
+                        'product_id' => $product->id,
+                        'plan_type' => $validated['plan_type'],
+                    ],
+                ]);
+
+                StripeTimeouts::forgetUserSubscriptionCaches($user);
+
+                $planLabel = $validated['plan_type'] === 'daily' ? 'Daily' : 'Monthly';
+
+                return response()->json([
+                    'success' => true,
+                    'subscriptionId' => $subscription->id,
+                    'redirect' => route('subscriptions.show', $subscription->id),
+                    'message' => $planLabel . ' subscription started successfully.',
+                ]);
+            } catch (ApiErrorException $e) {
+                if ($this->isStripeCurrencyConflict($e) && $attempt === 0) {
+                    $this->recreateStripeCustomer($user);
+                    continue;
+                }
+
+                return response()->json(['error' => $e->getMessage()], 400);
+            }
+        }
+
+        return response()->json(['error' => 'Unable to create subscription after payment.'], 500);
+    }
+
+    /**
+     * After trial fee PaymentIntent succeeds, start 7-day trial then monthly billing (USD).
+     */
+    public function confirmTrialMonthly(Request $request)
+    {
+        $this->extendExecutionTime();
+        $this->ensureStripeKey();
+
+        $validated = $request->validate([
+            'product_id' => 'required|exists:products,id',
+            'payment_intent_id' => 'required|string',
+        ]);
+
+        $user = $request->user();
+        $product = Product::findOrFail($validated['product_id']);
+
+        $paymentIntent = PaymentIntent::retrieve($validated['payment_intent_id']);
+
+        if ($paymentIntent->status !== 'succeeded') {
+            return response()->json(['error' => 'Trial payment is not completed.'], 422);
+        }
+
+        if ((string) ($paymentIntent->metadata->user_id ?? '') !== (string) $user->id) {
+            return response()->json(['error' => 'Invalid payment for this user.'], 403);
+        }
+
+        if ((string) ($paymentIntent->metadata->product_id ?? '') !== (string) $product->id) {
+            return response()->json(['error' => 'Payment does not match this product.'], 422);
+        }
+
+        if (empty($paymentIntent->payment_method)) {
+            return response()->json(['error' => 'No payment method on trial payment.'], 422);
+        }
+
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            try {
+                $user->refresh();
+                $customerId = $this->resolveStripeCustomer($user);
+
+                if ($this->hasRunningSubscriptionForProduct($customerId, (int) $product->id)) {
+                    return response()->json(['error' => 'You already have an active subscription for this product.'], 409);
+                }
+
+                // Subscription::create(..., default_payment_method) requires the PM on the customer.
+                // Even when PI.customer matches, the PM can still be only on the PaymentIntent until attached.
+                $this->attachPaymentMethodToCustomer($paymentIntent->payment_method, $customerId);
+
+                $subscription = Subscription::create([
+                    'customer' => $customerId,
+                    'default_payment_method' => $paymentIntent->payment_method,
+                    'trial_period_days' => self::TRIAL_DAYS,
+                    'items' => [
+                        $this->subscriptionItemForPlan($product, 'monthly'),
+                    ],
+                    'payment_settings' => [
+                        'save_default_payment_method' => 'on_subscription',
+                    ],
+                    'metadata' => [
+                        'user_id' => $user->id,
+                        'product_id' => $product->id,
+                        'plan_type' => 'trial_monthly',
+                    ],
+                ]);
+
+                StripeTimeouts::forgetUserSubscriptionCaches($user);
+
+                return response()->json([
+                    'success' => true,
+                    'subscriptionId' => $subscription->id,
+                    'redirect' => route('subscriptions.show', $subscription->id),
+                    'message' => 'Trial started: $0.50 paid. After ' . self::TRIAL_DAYS . ' days, billing is $1.00/month.',
+                ]);
+            } catch (ApiErrorException $e) {
+                if ($this->isStripeCurrencyConflict($e) && $attempt === 0) {
+                    $this->recreateStripeCustomer($user);
+                    continue;
+                }
+
+                return response()->json(['error' => $e->getMessage()], 400);
+            }
+        }
+
+        return response()->json(['error' => 'Unable to create subscription after trial payment.'], 500);
+    }
+
+    /**
+     * After confirmCardPayment succeeds on a subscription invoice PaymentIntent, ensure the card
+     * is attached to the Stripe customer (fixes "payment method must be attached to the customer").
+     */
+    public function syncPaymentMethodFromIntent(Request $request)
+    {
+        $this->extendExecutionTime();
+        $this->ensureStripeKey();
+
+        $validated = $request->validate([
+            'payment_intent_id' => 'required|string',
+        ]);
+
+        $user = $request->user();
+        $paymentIntent = PaymentIntent::retrieve($validated['payment_intent_id']);
+
+        if ($paymentIntent->status !== 'succeeded') {
+            return response()->json(['error' => 'Payment is not completed.'], 422);
+        }
+
+        if (empty($paymentIntent->payment_method)) {
+            return response()->json(['error' => 'No payment method on this payment.'], 422);
+        }
+
+        $customerId = $this->resolveStripeCustomer($user);
+
+        if (!empty($paymentIntent->customer) && $paymentIntent->customer !== $customerId) {
+            return response()->json(['error' => 'This payment belongs to a different customer.'], 403);
+        }
+
+        try {
+            $this->attachPaymentMethodToCustomer($paymentIntent->payment_method, $customerId);
+
+            \Stripe\Customer::update($customerId, [
+                'invoice_settings' => [
+                    'default_payment_method' => $paymentIntent->payment_method,
+                ],
+            ]);
+        } catch (ApiErrorException $e) {
+            return response()->json(['error' => $e->getMessage()], 400);
+        }
+
+        StripeTimeouts::forgetUserSubscriptionCaches($user);
+
+        return response()->json(['success' => true]);
+    }
+
+    public function show(string $subscriptionId)
+    {
+        $this->extendExecutionTime();
+        $this->ensureStripeKey();
+
+        $user = auth()->user();
+        if (empty($user->stripe_customer_id)) {
+            abort(404);
+        }
+
+        $subscription = Subscription::retrieve($subscriptionId);
+        if (($subscription->customer ?? null) !== $user->stripe_customer_id) {
+            abort(403);
+        }
+
+        $productId = (int) ($subscription->metadata->product_id ?? 0);
+        $product = $productId ? Product::find($productId) : null;
+
+        $planType = $subscription->metadata->plan_type ?? 'monthly';
+        $planLabel = [
+            'daily' => 'Daily',
+            'monthly' => 'Monthly',
+            'trial_monthly' => '7-day trial + monthly',
+        ][$planType] ?? ucfirst(str_replace('_', ' ', $planType));
+
+        return view('subscription-show', [
+            'subscription' => $subscription,
+            'product' => $product,
+            'planLabel' => $planLabel,
+            'trialEndsAt' => !empty($subscription->trial_end) ? Carbon::createFromTimestamp($subscription->trial_end) : null,
+            'currentPeriodEndsAt' => !empty($subscription->current_period_end) ? Carbon::createFromTimestamp($subscription->current_period_end) : null,
+        ]);
+    }
+}

@@ -1,8 +1,9 @@
 <div>
     <div class="products-header">
-        <h2>Our Products</h2>
+        <h2>All products</h2>
         @unless (auth()->user()->is_admin ?? false)
             <div class="header-links">
+                <a href="{{ route('products.tab') }}" class="btn btn-secondary" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3);">Subscription products</a>
                 <a href="{{ route('cart.index') }}" class="btn btn-cart">
                     Cart ({{ auth()->user()->cart ? auth()->user()->cart->items->sum('quantity') : 0 }})
                 </a>
