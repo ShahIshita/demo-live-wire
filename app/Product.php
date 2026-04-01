@@ -40,6 +40,11 @@ class Product extends Model
         return $this->hasMany(Review::class);
     }
 
+    public function subscriptionPlans()
+    {
+        return $this->hasMany(SubscriptionPlan::class)->orderBy('sort_order');
+    }
+
     public function favourites()
     {
         return $this->hasMany(Favourite::class);

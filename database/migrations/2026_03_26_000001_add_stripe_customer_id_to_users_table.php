@@ -13,6 +13,10 @@ class AddStripeCustomerIdToUsersTable extends Migration
      */
     public function up()
     {
+        if (Schema::hasColumn('users', 'stripe_customer_id')) {
+            return;
+        }
+
         Schema::table('users', function (Blueprint $table) {
             $table->string('stripe_customer_id')->nullable()->unique()->after('remember_token');
         });
@@ -25,6 +29,10 @@ class AddStripeCustomerIdToUsersTable extends Migration
      */
     public function down()
     {
+        if (!Schema::hasColumn('users', 'stripe_customer_id')) {
+            return;
+        }
+
         Schema::table('users', function (Blueprint $table) {
             $table->dropColumn('stripe_customer_id');
         });

@@ -3,31 +3,20 @@
 namespace App\Http\Controllers;
 
 use App\Product;
+use App\SubscriptionPlan;
 use App\Support\StripeTimeouts;
 use App\User;
+use App\UserSubscription;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Stripe\Exception\ApiErrorException;
 use Stripe\PaymentIntent;
 use Stripe\PaymentMethod;
-use Stripe\Product as StripeProduct;
 use Stripe\SetupIntent;
 use Stripe\Stripe;
-use Stripe\Subscription;
 
 class SubscriptionController extends Controller
 {
-    /** All amounts in smallest currency unit (cents for USD). */
-    private const CURRENCY = 'usd';
-
-    /** $1.00 / day (100 cents) — matches prior “100” demo pricing in dollars. */
-    private const AMOUNT_DAILY_CENTS = 100;
-
-    /** $1.00 / month (100 cents). */
-    private const AMOUNT_MONTHLY_CENTS = 100;
-
-    private const TRIAL_DAYS = 7;
-
     protected function extendExecutionTime(): void
     {
         if (function_exists('set_time_limit')) {
@@ -57,7 +46,6 @@ class SubscriptionController extends Controller
             'name' => $user->name,
             'metadata' => [
                 'user_id' => $user->id,
-                'app_currency' => self::CURRENCY,
             ],
         ]);
 
@@ -67,10 +55,6 @@ class SubscriptionController extends Controller
         return $customer->id;
     }
 
-    /**
-     * Stripe does not mix currencies on one customer (e.g. prior INR vs USD).
-     * Clear the stored id so the next call creates a fresh customer in the app currency.
-     */
     protected function isStripeCurrencyConflict(ApiErrorException $e): bool
     {
         $msg = $e->getMessage();
@@ -86,10 +70,6 @@ class SubscriptionController extends Controller
         return $this->resolveStripeCustomer($user->fresh());
     }
 
-    /**
-     * Stripe requires the payment method to be attached to the customer before using it as
-     * default_payment_method on Subscription, or when the API validates ownership.
-     */
     protected function attachPaymentMethodToCustomer(string $paymentMethodId, string $customerId): void
     {
         $pm = PaymentMethod::retrieve($paymentMethodId);
@@ -103,7 +83,6 @@ class SubscriptionController extends Controller
         try {
             $pm->attach(['customer' => $customerId]);
         } catch (ApiErrorException $e) {
-            // Already attached to this customer in a race, or Stripe idempotent edge case.
             $pm = PaymentMethod::retrieve($paymentMethodId);
             if (empty($pm->customer) || $pm->customer !== $customerId) {
                 throw $e;
@@ -111,68 +90,74 @@ class SubscriptionController extends Controller
         }
     }
 
-    /**
-     * @param string $planType daily|monthly (trial_monthly uses monthly recurring after trial)
-     */
-    protected function subscriptionItemForPlan(Product $product, string $planType): array
+    protected function setCustomerDefaultPaymentMethod(string $customerId, string $paymentMethodId): void
     {
-        $stripeProduct = StripeProduct::create([
-            'name' => $product->name . ' Subscription (' . $planType . ')',
-            'metadata' => [
-                'local_product_id' => (string) $product->id,
+        \Stripe\Customer::update($customerId, [
+            'invoice_settings' => [
+                'default_payment_method' => $paymentMethodId,
             ],
         ]);
-
-        $recurring = ['interval' => 'month'];
-        $unitAmount = self::AMOUNT_MONTHLY_CENTS;
-
-        if ($planType === 'daily') {
-            $recurring = ['interval' => 'day'];
-            $unitAmount = self::AMOUNT_DAILY_CENTS;
-        }
-
-        return [
-            // Inline price_data removes extra Stripe Product+Price API calls and reduces request time.
-            'price_data' => [
-                'currency' => self::CURRENCY,
-                'unit_amount' => $unitAmount,
-                'recurring' => $recurring,
-                'product' => $stripeProduct->id,
-            ],
-            'quantity' => 1,
-        ];
     }
 
-    protected function hasRunningSubscriptionForProduct(string $customerId, int $productId): bool
+    protected function hasRunningSubscriptionForPlan(User $user, int $subscriptionPlanId): bool
     {
-        $subscriptions = Subscription::all([
-            'customer' => $customerId,
-            'status' => 'all',
-            'limit' => 100,
+        $running = UserSubscription::query()
+            ->where('user_id', $user->id)
+            ->where('subscription_plan_id', $subscriptionPlanId)
+            ->whereIn('status', ['active', 'trialing', 'past_due', 'unpaid'])
+            ->where('cancel_at_period_end', false)
+            ->exists();
+
+        return $running;
+    }
+
+    protected function firstChargeAmountCents(SubscriptionPlan $plan): int
+    {
+        return $plan->recurringAmountCents();
+    }
+
+    protected function buildDeferredFirstPeriodEnd(SubscriptionPlan $plan): ?Carbon
+    {
+        if ($plan->deferred_first_period_days !== null) {
+            return now()->addDays($plan->deferred_first_period_days);
+        }
+        if ($plan->deferred_first_period_months !== null) {
+            return Carbon::now()->addMonthsNoOverflow($plan->deferred_first_period_months);
+        }
+
+        return null;
+    }
+
+    protected function persistLocalSubscription(
+        User $user,
+        Product $product,
+        SubscriptionPlan $plan,
+        string $paymentMethodId,
+        string $status,
+        ?Carbon $trialEndsAt,
+        ?Carbon $nextBillingAt,
+        ?Carbon $currentPeriodEndsAt
+    ): UserSubscription {
+        return UserSubscription::create([
+            'user_id' => $user->id,
+            'product_id' => $product->id,
+            'subscription_plan_id' => $plan->id,
+            'product_name_snapshot' => $product->name,
+            'stripe_subscription_id' => null,
+            'stripe_default_payment_method_id' => $paymentMethodId,
+            'status' => $status,
+            'trial_ends_at' => $trialEndsAt,
+            'current_period_ends_at' => $currentPeriodEndsAt,
+            'next_billing_at' => $nextBillingAt,
+            'cancel_at_period_end' => false,
+            'plan_code_snapshot' => $plan->code,
+            'payment_frequency_days_snapshot' => $plan->payment_frequency_days,
+            'free_trial_days_snapshot' => $plan->free_trial_days,
+            'is_joining_fees_snapshot' => $plan->is_joining_fees,
+            'joining_fees_snapshot' => $plan->joining_fees,
+            'is_subscription_period_snapshot' => $plan->is_subscription_period,
+            'subscription_period_snapshot' => $plan->subscription_period,
         ]);
-
-        foreach ($subscriptions->data as $subscription) {
-            $subscriptionProductId = (int) ($subscription->metadata->product_id ?? 0);
-            if ($subscriptionProductId !== $productId) {
-                continue;
-            }
-
-            $isRunning = in_array($subscription->status, ['active', 'trialing', 'past_due', 'unpaid'], true);
-            $isScheduledToCancel = (bool) ($subscription->cancel_at_period_end ?? false);
-
-            if ($isRunning && !$isScheduledToCancel) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    protected function firstChargeAmountForPlan(string $planType): int
-    {
-        return $planType === 'daily'
-            ? self::AMOUNT_DAILY_CENTS
-            : self::AMOUNT_MONTHLY_CENTS;
     }
 
     public function createIntent(Request $request)
@@ -181,30 +166,32 @@ class SubscriptionController extends Controller
         $this->ensureStripeKey();
 
         $validated = $request->validate([
-            'product_id' => 'required|exists:products,id',
-            'plan_type' => 'required|in:daily,monthly,trial_monthly',
+            'subscription_plan_id' => 'required|exists:subscription_plans,id',
         ]);
 
         $user = $request->user();
-        $product = Product::findOrFail($validated['product_id']);
+        $plan = SubscriptionPlan::query()
+            ->where('id', $validated['subscription_plan_id'])
+            ->where('is_active', true)
+            ->firstOrFail();
+        $product = $plan->product;
 
         for ($attempt = 0; $attempt < 2; $attempt++) {
             try {
                 $user->refresh();
                 $customerId = $this->resolveStripeCustomer($user);
 
-                if ($this->hasRunningSubscriptionForProduct($customerId, (int) $product->id)) {
-                    return response()->json(['error' => 'You already have an active subscription for this product.'], 409);
+                if ($this->hasRunningSubscriptionForPlan($user, (int) $plan->id)) {
+                    return response()->json(['error' => 'You already have an active subscription for this plan.'], 409);
                 }
 
-                if ($validated['plan_type'] === 'trial_monthly') {
+                if ($plan->collectsCardViaSetupIntentOnly()) {
                     $intent = SetupIntent::create([
                         'customer' => $customerId,
                         'usage' => 'off_session',
                         'metadata' => [
                             'user_id' => (string) $user->id,
-                            'product_id' => (string) $product->id,
-                            'plan_type' => 'trial_monthly',
+                            'subscription_plan_id' => (string) $plan->id,
                         ],
                         'payment_method_types' => ['card'],
                     ]);
@@ -215,23 +202,21 @@ class SubscriptionController extends Controller
                     ]);
                 }
 
-                $amount = $this->firstChargeAmountForPlan($validated['plan_type']);
+                $amount = $this->firstChargeAmountCents($plan);
                 $intent = PaymentIntent::create([
                     'amount' => $amount,
-                    'currency' => self::CURRENCY,
+                    'currency' => $plan->stripeCurrency(),
                     'customer' => $customerId,
                     'setup_future_usage' => 'off_session',
                     'metadata' => [
                         'user_id' => (string) $user->id,
-                        'product_id' => (string) $product->id,
-                        'plan_type' => $validated['plan_type'],
+                        'subscription_plan_id' => (string) $plan->id,
+                        'billing_type' => 'subscription_initial',
                     ],
                     'payment_method_types' => ['card'],
                 ]);
 
-                $label = $validated['plan_type'] === 'daily'
-                    ? 'Pay $1.00 now, then your daily plan will continue automatically.'
-                    : 'Pay $1.00 now, then your monthly plan will continue automatically.';
+                $label = 'Pay $' . number_format($amount / 100, 2) . ' now, then your plan renews automatically.';
 
                 return response()->json([
                     'mode' => 'plan_initial_payment',
@@ -251,22 +236,27 @@ class SubscriptionController extends Controller
         return response()->json(['error' => 'Unable to initialize subscription payment.'], 500);
     }
 
-    /**
-     * After daily/monthly first payment succeeds, create the recurring subscription.
-     */
     public function confirmPlanSubscription(Request $request)
     {
         $this->extendExecutionTime();
         $this->ensureStripeKey();
 
         $validated = $request->validate([
-            'product_id' => 'required|exists:products,id',
-            'plan_type' => 'required|in:daily,monthly',
+            'subscription_plan_id' => 'required|exists:subscription_plans,id',
             'payment_intent_id' => 'required|string',
         ]);
 
         $user = $request->user();
-        $product = Product::findOrFail($validated['product_id']);
+        $plan = SubscriptionPlan::query()
+            ->where('id', $validated['subscription_plan_id'])
+            ->where('is_active', true)
+            ->firstOrFail();
+
+        if ($plan->collectsCardViaSetupIntentOnly()) {
+            return response()->json(['error' => 'This plan uses the trial setup flow.'], 422);
+        }
+
+        $product = $plan->product;
         $paymentIntent = PaymentIntent::retrieve($validated['payment_intent_id']);
 
         if ($paymentIntent->status !== 'succeeded') {
@@ -277,16 +267,17 @@ class SubscriptionController extends Controller
             return response()->json(['error' => 'Invalid payment for this user.'], 403);
         }
 
-        if ((string) ($paymentIntent->metadata->product_id ?? '') !== (string) $product->id) {
-            return response()->json(['error' => 'Payment does not match this product.'], 422);
-        }
-
-        if ((string) ($paymentIntent->metadata->plan_type ?? '') !== (string) $validated['plan_type']) {
+        if ((string) ($paymentIntent->metadata->subscription_plan_id ?? '') !== (string) $plan->id) {
             return response()->json(['error' => 'Payment does not match the selected plan.'], 422);
         }
 
         if (empty($paymentIntent->payment_method)) {
             return response()->json(['error' => 'No payment method on this payment.'], 422);
+        }
+
+        $periodEnd = $this->buildDeferredFirstPeriodEnd($plan);
+        if ($periodEnd === null) {
+            return response()->json(['error' => 'This plan is not configured for the initial-payment checkout flow.'], 422);
         }
 
         for ($attempt = 0; $attempt < 2; $attempt++) {
@@ -298,42 +289,31 @@ class SubscriptionController extends Controller
                     return response()->json(['error' => 'This payment belongs to a different customer.'], 403);
                 }
 
-                if ($this->hasRunningSubscriptionForProduct($customerId, (int) $product->id)) {
-                    return response()->json(['error' => 'You already have an active subscription for this product.'], 409);
+                if ($this->hasRunningSubscriptionForPlan($user, (int) $plan->id)) {
+                    return response()->json(['error' => 'You already have an active subscription for this plan.'], 409);
                 }
 
                 $this->attachPaymentMethodToCustomer($paymentIntent->payment_method, $customerId);
+                $this->setCustomerDefaultPaymentMethod($customerId, $paymentIntent->payment_method);
 
-                $trialEnd = $validated['plan_type'] === 'daily'
-                    ? now()->addDay()->timestamp
-                    : Carbon::now()->addMonthNoOverflow()->timestamp;
-
-                $subscription = Subscription::create([
-                    'customer' => $customerId,
-                    'default_payment_method' => $paymentIntent->payment_method,
-                    'trial_end' => $trialEnd,
-                    'items' => [
-                        $this->subscriptionItemForPlan($product, $validated['plan_type']),
-                    ],
-                    'payment_settings' => [
-                        'save_default_payment_method' => 'on_subscription',
-                    ],
-                    'metadata' => [
-                        'user_id' => $user->id,
-                        'product_id' => $product->id,
-                        'plan_type' => $validated['plan_type'],
-                    ],
-                ]);
+                $userSubscription = $this->persistLocalSubscription(
+                    $user,
+                    $product,
+                    $plan,
+                    $paymentIntent->payment_method,
+                    'active',
+                    null,
+                    $periodEnd,
+                    $periodEnd
+                );
 
                 StripeTimeouts::forgetUserSubscriptionCaches($user);
 
-                $planLabel = $validated['plan_type'] === 'daily' ? 'Daily' : 'Monthly';
-
                 return response()->json([
                     'success' => true,
-                    'subscriptionId' => $subscription->id,
-                    'redirect' => route('subscriptions.show', $subscription->id),
-                    'message' => $planLabel . ' subscription started successfully.',
+                    'subscriptionId' => $userSubscription->id,
+                    'redirect' => route('subscriptions.show', $userSubscription),
+                    'message' => $plan->title . ' — subscription started successfully.',
                 ]);
             } catch (ApiErrorException $e) {
                 if ($this->isStripeCurrencyConflict($e) && $attempt === 0) {
@@ -348,22 +328,32 @@ class SubscriptionController extends Controller
         return response()->json(['error' => 'Unable to create subscription after payment.'], 500);
     }
 
-    /**
-     * After SetupIntent succeeds, start 7-day trial then monthly billing (USD).
-     */
     public function confirmTrialMonthly(Request $request)
     {
         $this->extendExecutionTime();
         $this->ensureStripeKey();
 
         $validated = $request->validate([
-            'product_id' => 'required|exists:products,id',
+            'subscription_plan_id' => 'required|exists:subscription_plans,id',
             'setup_intent_id' => 'required|string',
         ]);
 
         $user = $request->user();
-        $product = Product::findOrFail($validated['product_id']);
+        $plan = SubscriptionPlan::query()
+            ->where('id', $validated['subscription_plan_id'])
+            ->where('is_active', true)
+            ->firstOrFail();
 
+        if (!$plan->collectsCardViaSetupIntentOnly()) {
+            return response()->json(['error' => 'This plan does not use the trial setup flow.'], 422);
+        }
+
+        $trialDays = (int) $plan->stripe_trial_period_days;
+        if ($trialDays < 1) {
+            return response()->json(['error' => 'Plan trial is not configured.'], 422);
+        }
+
+        $product = $plan->product;
         $setupIntent = SetupIntent::retrieve($validated['setup_intent_id']);
 
         if ($setupIntent->status !== 'succeeded') {
@@ -374,12 +364,8 @@ class SubscriptionController extends Controller
             return response()->json(['error' => 'Invalid setup intent for this user.'], 403);
         }
 
-        if ((string) ($setupIntent->metadata->product_id ?? '') !== (string) $product->id) {
-            return response()->json(['error' => 'Setup intent does not match this product.'], 422);
-        }
-
-        if ((string) ($setupIntent->metadata->plan_type ?? '') !== 'trial_monthly') {
-            return response()->json(['error' => 'Setup intent does not match trial plan.'], 422);
+        if ((string) ($setupIntent->metadata->subscription_plan_id ?? '') !== (string) $plan->id) {
+            return response()->json(['error' => 'Setup intent does not match this plan.'], 422);
         }
 
         if (empty($setupIntent->payment_method)) {
@@ -391,37 +377,33 @@ class SubscriptionController extends Controller
                 $user->refresh();
                 $customerId = $this->resolveStripeCustomer($user);
 
-                if ($this->hasRunningSubscriptionForProduct($customerId, (int) $product->id)) {
-                    return response()->json(['error' => 'You already have an active subscription for this product.'], 409);
+                if ($this->hasRunningSubscriptionForPlan($user, (int) $plan->id)) {
+                    return response()->json(['error' => 'You already have an active subscription for this plan.'], 409);
                 }
 
-                // Ensure setup card is attached to customer before creating trial subscription.
                 $this->attachPaymentMethodToCustomer($setupIntent->payment_method, $customerId);
+                $this->setCustomerDefaultPaymentMethod($customerId, $setupIntent->payment_method);
 
-                $subscription = Subscription::create([
-                    'customer' => $customerId,
-                    'default_payment_method' => $setupIntent->payment_method,
-                    'trial_period_days' => self::TRIAL_DAYS,
-                    'items' => [
-                        $this->subscriptionItemForPlan($product, 'monthly'),
-                    ],
-                    'payment_settings' => [
-                        'save_default_payment_method' => 'on_subscription',
-                    ],
-                    'metadata' => [
-                        'user_id' => $user->id,
-                        'product_id' => $product->id,
-                        'plan_type' => 'trial_monthly',
-                    ],
-                ]);
+                $trialEnds = now()->addDays($trialDays);
+
+                $userSubscription = $this->persistLocalSubscription(
+                    $user,
+                    $product,
+                    $plan,
+                    $setupIntent->payment_method,
+                    'trialing',
+                    $trialEnds,
+                    $trialEnds,
+                    $trialEnds
+                );
 
                 StripeTimeouts::forgetUserSubscriptionCaches($user);
 
                 return response()->json([
                     'success' => true,
-                    'subscriptionId' => $subscription->id,
-                    'redirect' => route('subscriptions.show', $subscription->id),
-                    'message' => 'Trial started: no charge today. After ' . self::TRIAL_DAYS . ' days, billing is $1.00/month.',
+                    'subscriptionId' => $userSubscription->id,
+                    'redirect' => route('subscriptions.show', $userSubscription),
+                    'message' => 'Trial started: no charge today. After ' . $trialDays . ' days, billing begins per your plan.',
                 ]);
             } catch (ApiErrorException $e) {
                 if ($this->isStripeCurrencyConflict($e) && $attempt === 0) {
@@ -433,40 +415,26 @@ class SubscriptionController extends Controller
             }
         }
 
-        return response()->json(['error' => 'Unable to create subscription after trial payment.'], 500);
+        return response()->json(['error' => 'Unable to create subscription after trial setup.'], 500);
     }
 
-    public function show(string $subscriptionId)
+    public function show(UserSubscription $userSubscription)
     {
-        $this->extendExecutionTime();
-        $this->ensureStripeKey();
-
-        $user = auth()->user();
-        if (empty($user->stripe_customer_id)) {
-            abort(404);
-        }
-
-        $subscription = Subscription::retrieve($subscriptionId);
-        if (($subscription->customer ?? null) !== $user->stripe_customer_id) {
+        if ((int) $userSubscription->user_id !== (int) auth()->id()) {
             abort(403);
         }
 
-        $productId = (int) ($subscription->metadata->product_id ?? 0);
-        $product = $productId ? Product::find($productId) : null;
-
-        $planType = $subscription->metadata->plan_type ?? 'monthly';
-        $planLabel = [
-            'daily' => 'Daily',
-            'monthly' => 'Monthly',
-            'trial_monthly' => '7-day trial + monthly',
-        ][$planType] ?? ucfirst(str_replace('_', ' ', $planType));
+        $userSubscription->load(['product', 'subscriptionPlan']);
+        $planLabel = $userSubscription->subscriptionPlan
+            ? $userSubscription->subscriptionPlan->title
+            : ucfirst(str_replace('_', ' ', $userSubscription->plan_code_snapshot));
 
         return view('subscription-show', [
-            'subscription' => $subscription,
-            'product' => $product,
+            'userSubscription' => $userSubscription,
+            'product' => $userSubscription->product,
             'planLabel' => $planLabel,
-            'trialEndsAt' => !empty($subscription->trial_end) ? Carbon::createFromTimestamp($subscription->trial_end) : null,
-            'currentPeriodEndsAt' => !empty($subscription->current_period_end) ? Carbon::createFromTimestamp($subscription->current_period_end) : null,
+            'trialEndsAt' => $userSubscription->trial_ends_at,
+            'currentPeriodEndsAt' => $userSubscription->current_period_ends_at,
         ]);
     }
 }

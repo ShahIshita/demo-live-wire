@@ -74,6 +74,11 @@ class User extends Authenticatable
         return $this->hasMany(Review::class);
     }
 
+    public function userSubscriptions()
+    {
+        return $this->hasMany(UserSubscription::class);
+    }
+
     public function hasRole(string $slug): bool
     {
         return $this->roles()->where('slug', $slug)->exists();

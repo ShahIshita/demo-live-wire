@@ -6,12 +6,9 @@ use App\Cart;
 use App\CartItem;
 use App\Favourite;
 use App\Product;
-use App\Support\StripeTimeouts;
-use Illuminate\Support\Facades\Cache;
+use App\SubscriptionPlan;
+use App\UserSubscription;
 use Livewire\Component;
-use Stripe\Exception\ApiErrorException;
-use Stripe\Stripe;
-use Stripe\Subscription;
 
 class SubscriptionProductGrid extends Component
 {
@@ -21,49 +18,15 @@ class SubscriptionProductGrid extends Component
     protected function subscribedProductIds(): array
     {
         $user = auth()->user();
-        $secret = config('services.stripe.secret') ?: env('STRIPE_SECRET');
 
-        if (empty($user->stripe_customer_id) || empty($secret)) {
-            return [];
-        }
-
-        $cacheKey = StripeTimeouts::cacheKeySubscribedProductIds($user);
-        $cached = Cache::get($cacheKey);
-        if ($cached !== null) {
-            return $cached;
-        }
-
-        Stripe::setApiKey($secret);
-        StripeTimeouts::apply();
-
-        try {
-            $subscriptions = Subscription::all([
-                'customer' => $user->stripe_customer_id,
-                'status' => 'all',
-                'limit' => 100,
-            ]);
-        } catch (ApiErrorException $e) {
-            return [];
-        }
-
-        $productIds = [];
-        foreach ($subscriptions->data as $subscription) {
-            $isRunning = in_array($subscription->status, ['active', 'trialing', 'past_due'], true);
-            $isScheduledToCancel = (bool) ($subscription->cancel_at_period_end ?? false);
-
-            // Once user cancels, enable subscribe button again for that product.
-            if ($isRunning && !$isScheduledToCancel) {
-                $productId = $subscription->metadata->product_id ?? null;
-                if (!empty($productId)) {
-                    $productIds[] = (int) $productId;
-                }
-            }
-        }
-
-        $productIds = array_values(array_unique($productIds));
-        Cache::put($cacheKey, $productIds, 120);
-
-        return $productIds;
+        return UserSubscription::query()
+            ->where('user_id', $user->id)
+            ->whereIn('status', ['active', 'trialing', 'past_due', 'unpaid'])
+            ->where('cancel_at_period_end', false)
+            ->pluck('product_id')
+            ->unique()
+            ->values()
+            ->all();
     }
 
     public function addToCart($productId)
@@ -128,9 +91,27 @@ class SubscriptionProductGrid extends Component
             ->limit(self::FEATURED_LIMIT)
             ->get();
 
+        $plansByProduct = SubscriptionPlan::query()
+            ->whereIn('product_id', $products->pluck('id'))
+            ->where('is_active', true)
+            ->orderBy('sort_order')
+            ->get()
+            ->groupBy('product_id');
+
+        $plansByProductForJs = [];
+        foreach ($plansByProduct as $productId => $plans) {
+            $plansByProductForJs[(int) $productId] = $plans->map(function (SubscriptionPlan $p) {
+                return [
+                    'id' => $p->id,
+                    'title' => $p->title,
+                ];
+            })->values()->all();
+        }
+
         return view('livewire.user.subscription-product-grid', [
             'products' => $products,
             'subscribedProductIds' => $subscribedProductIds,
+            'plansByProductForJs' => $plansByProductForJs,
         ]);
     }
 }

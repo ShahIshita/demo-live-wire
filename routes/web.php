@@ -45,7 +45,7 @@ Route::middleware('auth')->group(function () {
         return view('dashboard');
     })->name('dashboard');
 
-    /** Featured products + subscription module (4 items, 3 plan types). */
+    /** Featured products + subscription module (plans from subscription_plans table). */
     Route::get('/products', function () {
         return view('products-tab');
     })->name('products.tab');
@@ -80,7 +80,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/stripe/subscriptions/create-intent', [SubscriptionController::class, 'createIntent'])->name('stripe.subscriptions.create-intent');
     Route::post('/stripe/subscriptions/confirm-plan', [SubscriptionController::class, 'confirmPlanSubscription'])->name('stripe.subscriptions.confirm-plan');
     Route::post('/stripe/subscriptions/confirm-trial-monthly', [SubscriptionController::class, 'confirmTrialMonthly'])->name('stripe.subscriptions.confirm-trial-monthly');
-    Route::get('/subscriptions/{subscriptionId}', [SubscriptionController::class, 'show'])->name('subscriptions.show');
+    Route::get('/subscriptions/{userSubscription}', [SubscriptionController::class, 'show'])->name('subscriptions.show');
 
     // Admin routes (admin-only access)
     Route::middleware('admin')->prefix('admin')->name('admin.')->group(function () {

@@ -28,15 +28,6 @@
                     <p class="product-price">${{ number_format($product->price, 2) }}</p>
                     <p class="product-stock">In stock: {{ $product->stock_quantity }}</p>
 
-                    <!-- <div class="subscription-card-plans" aria-label="Available subscription plans">
-                        <p class="subscription-card-plans-title">Subscription options</p>
-                        <ul class="subscription-card-plans-list">
-                            <li><strong>Daily</strong> — $1.00 charged every day</li>
-                            <li><strong>Trial + monthly</strong> — 7-day free trial, then $1.00 per month</li>
-                            <li><strong>Monthly</strong> — $1.00 per month</li>
-                        </ul>
-                    </div> -->
-
                     @unless (auth()->user()->is_admin ?? false)
                         <div class="product-actions">
                             <button wire:click="addToCart({{ $product->id }})" class="btn btn-add-cart">
@@ -45,14 +36,18 @@
                             <button wire:click="addToFavourite({{ $product->id }})" class="btn btn-fav {{ $this->isFavourite($product->id) ? 'is-favourite' : '' }}">
                                 {{ $this->isFavourite($product->id) ? '♥ Favourited' : '♡ Favourite' }}
                             </button>
+                            @php
+                                $isSubscribed = in_array((int) $product->id, array_map('intval', $subscribedProductIds ?? []), true);
+                            @endphp
                             <button
                                 type="button"
-                                class="btn btn-subscription open-subscription-modal"
+                                class="btn btn-subscription open-subscription-modal {{ $isSubscribed ? 'is-subscribed' : '' }}"
                                 data-product-id="{{ $product->id }}"
                                 data-product-name="{{ $product->name }}"
-                                {{ in_array($product->id, $subscribedProductIds ?? []) ? 'disabled' : '' }}
+                                data-subscribed="{{ $isSubscribed ? '1' : '0' }}"
+                                @if($isSubscribed) disabled @endif
                             >
-                                {{ in_array($product->id, $subscribedProductIds ?? []) ? 'Subscribed ✓' : 'Subscribe' }}
+                                {{ $isSubscribed ? 'Subscribed ✓' : 'Subscribe' }}
                             </button>
                         </div>
                     @endunless
@@ -70,29 +65,7 @@
             <h3 id="subscription-modal-title">Choose a subscription plan</h3>
             <p class="subscription-modal-product" id="subscription-modal-product"></p>
 
-            <div class="subscription-plan-list">
-                <label class="subscription-plan-option">
-                    <input type="radio" name="subscription-plan" value="daily" checked>
-                    <span>
-                        <strong>Daily</strong><br>
-                        Pay $1.00 now, then renews every day.
-                    </span>
-                </label>
-                <label class="subscription-plan-option">
-                    <input type="radio" name="subscription-plan" value="trial_monthly">
-                    <span>
-                        <strong>7-day trial + monthly</strong><br>
-                        No charge today. Starts 7-day trial, then $1.00 per month.
-                    </span>
-                </label>
-                <label class="subscription-plan-option">
-                    <input type="radio" name="subscription-plan" value="monthly">
-                    <span>
-                        <strong>Monthly</strong><br>
-                        Pay $1.00 now, then renews every month.
-                    </span>
-                </label>
-            </div>
+            <div id="subscription-plan-list" class="subscription-plan-list" role="radiogroup" aria-labelledby="subscription-modal-title"></div>
 
             <div id="subscription-card-element" class="subscription-card-element"></div>
             <p id="subscription-errors" class="payment-errors"></p>
@@ -115,6 +88,8 @@
     var stripeKey = @json(config('services.stripe.key'));
     if (!stripeKey) return;
 
+    var plansByProduct = @json($plansByProductForJs ?? []);
+
     var stripe = Stripe(stripeKey);
     var elements = stripe.elements();
     var card = elements.create('card');
@@ -130,19 +105,57 @@
     var submitBtn = document.getElementById('subscription-modal-submit');
     var errorEl = document.getElementById('subscription-errors');
     var productNameEl = document.getElementById('subscription-modal-product');
+    var planListEl = document.getElementById('subscription-plan-list');
     var cardElSelector = '#subscription-card-element';
 
     function setError(message) {
         errorEl.textContent = message || '';
     }
 
-    function openModal(productId, productName) {
+    function renderPlanRadios(productId) {
+        if (!planListEl) return;
+        var pid = parseInt(productId, 10);
+        var plans = plansByProduct[pid] || [];
+        planListEl.innerHTML = '';
+        if (!plans.length) {
+            planListEl.innerHTML = '<p class="payment-errors">No subscription plans for this product. Ask an admin to run the subscription plan seeder.</p>';
+            return;
+        }
+        plans.forEach(function(p, idx) {
+            var label = document.createElement('label');
+            label.className = 'subscription-plan-option';
+            var input = document.createElement('input');
+            input.type = 'radio';
+            input.name = 'subscription-plan';
+            input.value = String(p.id);
+            if (idx === 0) input.checked = true;
+            var span = document.createElement('span');
+            span.innerHTML = '<strong>' + escapeHtml(p.title) + '</strong>';
+            label.appendChild(input);
+            label.appendChild(span);
+            planListEl.appendChild(label);
+        });
+    }
+
+    function escapeHtml(text) {
+        var d = document.createElement('div');
+        d.textContent = text;
+        return d.innerHTML;
+    }
+
+    function openModal(productId, productName, triggerBtn) {
+        if (triggerBtn && (triggerBtn.disabled || triggerBtn.getAttribute('data-subscribed') === '1')) {
+            return;
+        }
         selectedProductId = productId;
         selectedProductName = productName || '';
         productNameEl.textContent = selectedProductName;
         modal.classList.add('is-open');
         modal.setAttribute('aria-hidden', 'false');
         setError('');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Continue';
+        renderPlanRadios(productId);
 
         if (!cardMounted) {
             card.mount(cardElSelector);
@@ -158,9 +171,9 @@
         setError('');
     }
 
-    function selectedPlanType() {
+    function selectedSubscriptionPlanId() {
         var plan = document.querySelector('input[name="subscription-plan"]:checked');
-        return plan ? plan.value : 'daily';
+        return plan ? parseInt(plan.value, 10) : null;
     }
 
     function postJson(url, payload) {
@@ -171,12 +184,27 @@
                 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content,
                 'Accept': 'application/json'
             },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            credentials: 'same-origin'
         }).then(function(response) {
-            return response.json().then(function(data) {
+            return response.text().then(function(text) {
+                var data = {};
+                try {
+                    data = text ? JSON.parse(text) : {};
+                } catch (parseErr) {
+                    var err = new Error(
+                        'Invalid server response (HTTP ' + response.status + '). Try refreshing the page or logging in again.'
+                    );
+                    err.httpStatus = response.status;
+                    throw err;
+                }
                 if (!response.ok) {
-                    var message = (data && (data.error || data.message)) ? (data.error || data.message) : 'Request failed.';
-                    throw new Error(message);
+                    var message = (data && (data.error || data.message))
+                        ? (data.error || data.message)
+                        : ('Request failed (HTTP ' + response.status + ').');
+                    var httpErr = new Error(message);
+                    httpErr.httpStatus = response.status;
+                    throw httpErr;
                 }
                 return data;
             });
@@ -189,14 +217,18 @@
             return;
         }
 
-        var planType = selectedPlanType();
+        var subscriptionPlanId = selectedSubscriptionPlanId();
+        if (!subscriptionPlanId) {
+            setError('Please select a subscription plan.');
+            return;
+        }
+
         submitBtn.disabled = true;
         submitBtn.textContent = 'Processing...';
         setError('');
 
         postJson('{{ route('stripe.subscriptions.create-intent') }}', {
-            product_id: selectedProductId,
-            plan_type: planType
+            subscription_plan_id: subscriptionPlanId
         })
             .then(function(intentData) {
                 if (intentData.mode === 'trial_setup_intent') {
@@ -210,7 +242,7 @@
                         }
 
                         return postJson('{{ route('stripe.subscriptions.confirm-trial-monthly') }}', {
-                            product_id: selectedProductId,
+                            subscription_plan_id: subscriptionPlanId,
                             setup_intent_id: result.setupIntent.id
                         });
                     });
@@ -227,8 +259,7 @@
                         }
 
                         return postJson('{{ route('stripe.subscriptions.confirm-plan') }}', {
-                            product_id: selectedProductId,
-                            plan_type: planType,
+                            subscription_plan_id: subscriptionPlanId,
                             payment_intent_id: result.paymentIntent.id
                         });
                     });
@@ -246,19 +277,29 @@
                 window.location.reload();
             })
             .catch(function(err) {
+                var msg = err.message || 'Subscription failed. Please try again.';
+                setError(msg);
+                if (err.httpStatus === 409 || (msg && msg.indexOf('already have an active subscription') !== -1)) {
+                    submitBtn.disabled = true;
+                    submitBtn.textContent = 'Already subscribed';
+                    window.setTimeout(function() {
+                        closeModal();
+                        window.location.reload();
+                    }, 900);
+                    return;
+                }
                 submitBtn.disabled = false;
                 submitBtn.textContent = 'Continue';
-                setError(err.message || 'Subscription failed. Please try again.');
             });
     }
 
     document.addEventListener('click', function(e) {
         var trigger = e.target.closest('.open-subscription-modal');
         if (trigger) {
-            if (trigger.hasAttribute('disabled')) {
+            if (trigger.disabled || trigger.getAttribute('data-subscribed') === '1') {
                 return;
             }
-            openModal(trigger.getAttribute('data-product-id'), trigger.getAttribute('data-product-name'));
+            openModal(trigger.getAttribute('data-product-id'), trigger.getAttribute('data-product-name'), trigger);
             return;
         }
 

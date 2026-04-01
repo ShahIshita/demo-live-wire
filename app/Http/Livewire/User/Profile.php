@@ -2,14 +2,10 @@
 
 namespace App\Http\Livewire\User;
 
-use App\Product;
 use App\Support\StripeTimeouts;
-use Carbon\Carbon;
+use App\UserSubscription;
 use Illuminate\Support\Facades\Cache;
 use Livewire\Component;
-use Stripe\Exception\ApiErrorException;
-use Stripe\Stripe;
-use Stripe\Subscription;
 
 class Profile extends Component
 {
@@ -30,33 +26,14 @@ class Profile extends Component
         }
     }
 
-    protected function setStripeApiKey(): bool
-    {
-        $secret = config('services.stripe.secret') ?: env('STRIPE_SECRET');
-        if (empty($secret)) {
-            $this->subscriptionError = 'Stripe is not configured right now.';
-            return false;
-        }
-
-        Stripe::setApiKey($secret);
-        StripeTimeouts::apply();
-
-        return true;
-    }
-
+    /**
+     * Subscription list from local DB only (no Stripe Subscription API calls).
+     */
     protected function getSubscriptionsWithDetails(): array
     {
         $user = auth()->user();
         $details = [];
         $this->subscriptionError = null;
-
-        if (empty($user->stripe_customer_id)) {
-            return $details;
-        }
-
-        if (!$this->setStripeApiKey()) {
-            return $details;
-        }
 
         $cacheKey = StripeTimeouts::cacheKeyProfileSubscriptions($user);
         $cached = Cache::get($cacheKey);
@@ -64,47 +41,40 @@ class Profile extends Component
             return $cached;
         }
 
-        try {
-            $subscriptions = Subscription::all([
-                'customer' => $user->stripe_customer_id,
-                'status' => 'all',
-                'limit' => 100,
-            ]);
-        } catch (ApiErrorException $e) {
-            $this->subscriptionError = 'We could not load your subscription details right now.';
+        $rows = UserSubscription::query()
+            ->where('user_id', $user->id)
+            ->with(['product', 'subscriptionPlan'])
+            ->orderByDesc('created_at')
+            ->get();
 
-            return [];
-        }
-
-        $metadataProductIds = [];
-        foreach ($subscriptions->data as $subscription) {
-            $productId = $subscription->metadata->product_id ?? null;
-            if (!empty($productId)) {
-                $metadataProductIds[] = (int) $productId;
-            }
-        }
-
-        $productNames = Product::whereIn('id', $metadataProductIds)->pluck('name', 'id')->toArray();
-
-        foreach ($subscriptions->data as $subscription) {
-            if (!in_array($subscription->status, ['active', 'trialing', 'past_due', 'unpaid'])) {
+        foreach ($rows as $row) {
+            if (!in_array($row->status, ['active', 'trialing', 'past_due', 'unpaid'], true)) {
                 continue;
             }
 
-            $productId = (int) ($subscription->metadata->product_id ?? 0);
-            $trialEnd = !empty($subscription->trial_end) ? Carbon::createFromTimestamp($subscription->trial_end) : null;
-            $currentPeriodEnd = !empty($subscription->current_period_end) ? Carbon::createFromTimestamp($subscription->current_period_end) : null;
+            $trialEnd = $row->trial_ends_at;
+            $currentPeriodEnd = $row->current_period_ends_at;
+            $plan = $row->subscriptionPlan;
 
             $details[] = [
-                'id' => $subscription->id,
-                'status' => $subscription->status,
-                'product_id' => $productId ?: null,
-                'product_name' => $productNames[$productId] ?? 'Subscription Product',
-                'plan_type' => $subscription->metadata->plan_type ?? 'standard',
+                'id' => $row->id,
+                'stripe_legacy_id' => $row->stripe_subscription_id,
+                'status' => $row->status,
+                'product_id' => $row->product_id,
+                'product_name' => $row->product ? $row->product->name : 'Subscription Product',
+                'plan_type' => $row->plan_code_snapshot,
+                'plan_title' => $plan ? $plan->title : ucfirst(str_replace('_', ' ', $row->plan_code_snapshot)),
+                'payment_frequency_days' => $row->payment_frequency_days_snapshot,
+                'free_trial_days_snapshot' => $row->free_trial_days_snapshot,
+                'is_joining_fees_snapshot' => $row->is_joining_fees_snapshot,
+                'joining_fees_snapshot' => $row->joining_fees_snapshot,
+                'is_subscription_period_snapshot' => $row->is_subscription_period_snapshot,
+                'subscription_period_snapshot' => $row->subscription_period_snapshot,
                 'trial_days_left' => $trialEnd ? max(0, now()->diffInDays($trialEnd, false)) : null,
                 'trial_ends_at' => $trialEnd,
                 'current_period_ends_at' => $currentPeriodEnd,
-                'auto_renew' => !$subscription->cancel_at_period_end,
+                'next_billing_at' => $row->next_billing_at,
+                'auto_renew' => !$row->cancel_at_period_end,
             ];
         }
 
@@ -116,28 +86,23 @@ class Profile extends Component
     public function cancelSubscription(string $subscriptionId)
     {
         $user = auth()->user();
-        if (empty($user->stripe_customer_id) || !$this->setStripeApiKey()) {
-            return;
-        }
 
-        try {
-            $subscription = Subscription::retrieve($subscriptionId);
+        if (ctype_digit((string) $subscriptionId)) {
+            $local = UserSubscription::query()
+                ->where('id', (int) $subscriptionId)
+                ->where('user_id', $user->id)
+                ->first();
 
-            if ($subscription->customer !== $user->stripe_customer_id) {
-                session()->flash('message', 'Invalid subscription selected.');
+            if ($local) {
+                $local->update(['cancel_at_period_end' => true]);
+                StripeTimeouts::forgetUserSubscriptionCaches($user);
+                session()->flash('message', 'Subscription will be canceled at period end.');
+
                 return;
             }
-
-            Subscription::update($subscriptionId, [
-                'cancel_at_period_end' => true,
-            ]);
-
-            StripeTimeouts::forgetUserSubscriptionCaches($user);
-
-            session()->flash('message', 'Subscription will be canceled at period end.');
-        } catch (ApiErrorException $e) {
-            session()->flash('message', 'Unable to cancel subscription right now.');
         }
+
+        session()->flash('message', 'Subscription not found or already removed.');
     }
 
     public function render()

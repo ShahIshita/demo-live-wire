@@ -97,7 +97,19 @@
                                         'trial_monthly' => '7-day trial + monthly',
                                     ][$subscription['plan_type']] ?? ucfirst(str_replace('_', ' ', $subscription['plan_type']));
                                 @endphp
-                                <p><strong>Plan type:</strong> {{ $planTypeLabel }}</p>
+                                <p><strong>Plan:</strong> {{ $subscription['plan_title'] ?? $planTypeLabel }}</p>
+                                @if (!empty($subscription['payment_frequency_days']))
+                                    <p><strong>Billing cycle (reference):</strong> every {{ $subscription['payment_frequency_days'] }} day(s)</p>
+                                @endif
+                                @if (!empty($subscription['free_trial_days_snapshot']))
+                                    <p><strong>Plan free trial (days):</strong> {{ $subscription['free_trial_days_snapshot'] }}</p>
+                                @endif
+                                @if (!empty($subscription['is_joining_fees_snapshot']) && $subscription['joining_fees_snapshot'])
+                                    <p><strong>Joining fee (snapshot):</strong> ${{ number_format($subscription['joining_fees_snapshot'], 2) }}</p>
+                                @endif
+                                @if (!empty($subscription['is_subscription_period_snapshot']) && $subscription['subscription_period_snapshot'])
+                                    <p><strong>Fixed period (snapshot):</strong> {{ $subscription['subscription_period_snapshot'] }}</p>
+                                @endif
 
                                 @if ($subscription['trial_ends_at'])
                                     <p><strong>Trial ends:</strong> {{ $subscription['trial_ends_at']->format('M d, Y') }}</p>
@@ -106,6 +118,10 @@
 
                                 @if ($subscription['current_period_ends_at'])
                                     <p><strong>Current period ends:</strong> {{ $subscription['current_period_ends_at']->format('M d, Y') }}</p>
+                                @endif
+
+                                @if (!empty($subscription['next_billing_at']))
+                                    <p><strong>Next billing:</strong> {{ $subscription['next_billing_at']->format('M d, Y H:i') }}</p>
                                 @endif
 
                                 <p><strong>Auto renew:</strong> {{ $subscription['auto_renew'] ? 'On' : 'Off' }}</p>
