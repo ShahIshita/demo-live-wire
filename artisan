@@ -5,6 +5,19 @@ define('LARAVEL_START', microtime(true));
 
 /*
 |--------------------------------------------------------------------------
+| Quieter CLI on PHP 8+ (Laravel 8 vendor triggers ArrayAccess deprecations)
+|--------------------------------------------------------------------------
+|
+| Real errors still show; only E_DEPRECATED / E_USER_DEPRECATED are hidden
+| for console so Artisan output (e.g. subscriptions:renew) stays readable.
+|
+*/
+if (PHP_SAPI === 'cli') {
+    error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
+}
+
+/*
+|--------------------------------------------------------------------------
 | Register The Auto Loader
 |--------------------------------------------------------------------------
 |

@@ -494,6 +494,7 @@
         .order-status-badge.shipped { background: #bee3f8; color: #2c5282; }
         .order-status-badge.delivered { background: #c6f6d5; color: #22543d; }
         .order-status-badge.pending { background: #feebc8; color: #c05621; }
+        .order-status-badge.processing { background: #bee3f8; color: #2c5282; }
         .order-status-badge.active { background: #c6f6d5; color: #22543d; }
         .order-status-badge.trialing { background: #bee3f8; color: #2c5282; }
         .order-status-badge.past_due, .order-status-badge.unpaid { background: #fed7d7; color: #c53030; }

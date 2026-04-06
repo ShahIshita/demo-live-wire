@@ -22,6 +22,7 @@ class SubscriptionPlan extends Model
         'subscription_period',
         'recurring_price',
         'currency',
+        // stripe_interval* = local billing cadence only (see computeNextBillingAfter); not Stripe API catalog.
         'stripe_interval',
         'stripe_interval_count',
         'stripe_trial_period_days',

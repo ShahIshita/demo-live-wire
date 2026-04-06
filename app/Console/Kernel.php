@@ -24,13 +24,13 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule)
     {
-        $schedule->command('subscriptions:renew')
-            ->everyFiveMinutes()
-            ->withoutOverlapping();
+        // $schedule->command('subscriptions:renew')
+        //     ->everyFiveMinutes()
+        //     ->withoutOverlapping();
 
-        $schedule->command('subscriptions:sync-stripe')
-            ->hourly()
-            ->withoutOverlapping();
+        // $schedule->command('subscriptions:sync-stripe')
+        //     ->hourly()
+        //     ->withoutOverlapping();
     }
 
     /**

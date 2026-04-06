@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Product;
 use App\SubscriptionPlan;
+use App\Support\LocalSubscriptionBilling;
 use App\Support\StripeTimeouts;
 use App\User;
 use App\UserSubscription;
@@ -15,6 +16,10 @@ use Stripe\PaymentMethod;
 use Stripe\SetupIntent;
 use Stripe\Stripe;
 
+/**
+ * Subscriptions are stored in the database only. Stripe does not manage subscription objects or catalog products;
+ * charges are one-off PaymentIntents / SetupIntents. Renewals run via {@see \App\Console\Commands\ProcessSubscriptionRenewals}.
+ */
 class SubscriptionController extends Controller
 {
     protected function extendExecutionTime(): void
@@ -211,7 +216,7 @@ class SubscriptionController extends Controller
                     'metadata' => [
                         'user_id' => (string) $user->id,
                         'subscription_plan_id' => (string) $plan->id,
-                        'billing_type' => 'subscription_initial',
+                        'billing_type' => LocalSubscriptionBilling::BILLING_TYPE_INITIAL,
                     ],
                     'payment_method_types' => ['card'],
                 ]);

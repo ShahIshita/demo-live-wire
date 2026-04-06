@@ -5,7 +5,10 @@ namespace App\Http\Controllers;
 use App\Address;
 use App\Order;
 use App\OrderItem;
+use App\Support\LocalSubscriptionBilling;
+use App\Support\StripeTimeouts;
 use App\User;
+use App\UserSubscription;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -18,6 +21,22 @@ use UnexpectedValueException;
 
 class StripeController extends Controller
 {
+    protected function applySuccessfulPaymentState(Order $order): void
+    {
+        $order->stripe_payment_status = 'succeeded';
+        $order->payment_status = 'paid';
+
+        if ($order->status === 'pending') {
+            $order->status = 'processing';
+        }
+    }
+
+    protected function applyFailedPaymentState(Order $order): void
+    {
+        $order->stripe_payment_status = 'failed';
+        $order->payment_status = 'failed';
+    }
+
     protected function formatStripeAmount($amountInCents): string
     {
         return number_format(((int) $amountInCents) / 100, 2);
@@ -148,8 +167,17 @@ class StripeController extends Controller
             return response()->json(['error' => 'Invalid payment'], 400);
         }
 
-        if (Order::where('stripe_payment_intent_id', $request->payment_intent_id)->exists()) {
-            return response()->json(['error' => 'Order already placed', 'order_id' => Order::where('stripe_payment_intent_id', $request->payment_intent_id)->first()->id], 400);
+        $existingOrder = Order::where('stripe_payment_intent_id', $request->payment_intent_id)->first();
+        if ($existingOrder) {
+            $this->applySuccessfulPaymentState($existingOrder);
+            $existingOrder->save();
+
+            return response()->json([
+                'success' => true,
+                'order_id' => $existingOrder->id,
+                'redirect' => route('orders.show', $existingOrder->id),
+                'message' => 'Order already placed.',
+            ]);
         }
 
         DB::beginTransaction();
@@ -167,9 +195,9 @@ class StripeController extends Controller
                 'subtotal' => $subtotal,
                 'total' => $total,
                 'stripe_payment_intent_id' => $request->payment_intent_id,
-                'stripe_payment_status' => 'succeeded',
-                'payment_status' => 'paid',
             ]);
+            $this->applySuccessfulPaymentState($order);
+            $order->save();
 
             foreach ($cartItems as $item) {
                 OrderItem::create([
@@ -234,16 +262,15 @@ class StripeController extends Controller
                     $previousPaymentStatus = $order->payment_status;
 
                     if ($type === 'payment_intent.succeeded') {
-                        $order->stripe_payment_status = 'succeeded';
-                        $order->payment_status = 'paid';
                         if ($order->status === 'cancelled') {
                             // keep cancelled status untouched
-                        } elseif ($order->status === 'pending') {
-                            $order->status = 'processing';
+                            $order->stripe_payment_status = 'succeeded';
+                            $order->payment_status = 'paid';
+                        } else {
+                            $this->applySuccessfulPaymentState($order);
                         }
                     } else {
-                        $order->stripe_payment_status = 'failed';
-                        $order->payment_status = 'failed';
+                        $this->applyFailedPaymentState($order);
                     }
                     $order->save();
 
@@ -257,10 +284,12 @@ class StripeController extends Controller
                         }
                     }
                 } else {
-                    // Fallback for failed payments when order has not been created yet.
+                    $this->handleLocalSubscriptionRenewalWebhook($type, $object);
+
+                    // Fallback for failed shop checkout when order has not been created yet (not subscription renewal).
                     if ($type === 'payment_intent.payment_failed') {
                         $user = $this->resolveUserFromWebhookObject($object, null);
-                        if ($user) {
+                        if ($user && ($object->metadata->billing_type ?? '') !== LocalSubscriptionBilling::BILLING_TYPE_RENEWAL) {
                             $this->sendPaymentFailedEmail($user, null, $object);
                         }
                     }
@@ -280,5 +309,32 @@ class StripeController extends Controller
         }
 
         return response()->json(['received' => true]);
+    }
+
+    /**
+     * Local DB subscriptions use one-off PaymentIntents for renewals (no Stripe Subscription objects).
+     * If the renewal command succeeds, DB is updated there; this webhook backs up failure state if Stripe notifies async.
+     */
+    protected function handleLocalSubscriptionRenewalWebhook(string $type, $object): void
+    {
+        if (($object->metadata->billing_type ?? '') !== LocalSubscriptionBilling::BILLING_TYPE_RENEWAL) {
+            return;
+        }
+
+        $usId = $object->metadata->user_subscription_id ?? null;
+        if (!$usId) {
+            return;
+        }
+
+        $us = UserSubscription::with('user')->find((int) $usId);
+        if (!$us || !$us->user) {
+            return;
+        }
+
+        if ($type === 'payment_intent.payment_failed' && in_array($us->status, ['active', 'trialing'], true)) {
+            $us->update(['status' => 'past_due']);
+            StripeTimeouts::forgetUserSubscriptionCaches($us->user);
+            Log::info('Subscription renewal payment failed (webhook)', ['user_subscription_id' => $us->id]);
+        }
     }
 }
